@@ -74,7 +74,7 @@ for i, N in enumerate(Ns):
     global_sum_sq = domain.comm.allreduce(local_sum_sq, op=MPI.SUM)
     eta = np.sqrt(global_sum_sq)
 
-    TRE, ERE, EI = compute_error_metrics(domain, V, uh, u_ex_func, eta)
+    TRE, ERE, EI = compute_error_metrics(uh, u_numpy, eta, degree_raise=3)
 
     hs[i] = 1.0 / N
 

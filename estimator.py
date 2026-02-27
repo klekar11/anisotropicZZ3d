@@ -4,6 +4,7 @@ from dolfinx import fem, mesh, default_scalar_type
 from dolfinx.fem import form
 from dolfinx.fem.petsc import LinearProblem
 import ufl
+import basix.ufl
 from mpi4py import MPI
 
 def compute_eta_k(u_h: fem.Function, f: ufl.core.expr.Expr, cell_index: int) -> float:
@@ -102,14 +103,96 @@ def compute_eta(u_h: fem.Function, f: ufl.core.expr.Expr) -> np.ndarray:
     #eta_K = term1 + term2
 
     return eta_local
+    
+def compute_gradient_dg0(u_h: fem.Function):
+    
+    domain = u_h.function_space.mesh
+    gdim   = domain.geometry.dim
+    
+    dg0_element  = basix.ufl.element("DG", domain.topology.cell_name(), 0, shape=(gdim,))
+    V_dg0_vec = fem.functionspace(domain, dg0_element)
+    interp_points = V_dg0_vec.element.interpolation_points
+    grad_expr = fem.Expression(ufl.grad(u_h), interp_points)
 
+    grad_dg0 = fem.Function(V_dg0_vec)
+    grad_dg0.interpolate(grad_expr)
+
+    return grad_dg0
+    
+def compute_zz_grad(u_h: fem.Function):
+    domain = u_h.function_space.mesh
+    tdim = domain.topology.dim
+    gdim = domain.geometry.dim
+    
+    domain.topology.create_entities(0)
+    domain.topology.create_connectivity(tdim, 0)
+    domain.topology.create_connectivity(0, tdim)
+
+    cell_to_vertex = domain.topology.connectivity(tdim, 0)
+    vertex_to_cell = domain.topology.connectivity(0, tdim)
+    
+    V0 = fem.functionspace(domain, ("DG", 0))
+    v0 = ufl.TestFunction(V0)
+
+    n_cells_owned = V0.dofmap.index_map.size_local
+    n_cells_ghost = V0.dofmap.index_map.num_ghosts
+    n_cells_local = n_cells_owned + n_cells_ghost
+
+    one = fem.Constant(domain, default_scalar_type(1.0))
+    b_vol = fem.assemble_vector(form(one * v0 * ufl.dx))
+    b_vol.scatter_reverse(dolfinx.la.InsertMode.add)
+    vol_fn = fem.Function(V0)
+    vol_fn.x.array[:] = b_vol.array[:]
+    vol_fn.x.scatter_forward()
+    vol = vol_fn.x.array 
+    
+    grad_dg0 = compute_gradient_dg0(u_h)
+    
+    V_cg = fem.functionspace(domain, ("Lagrange", 1))
+    n_dofs_owned = V_cg.dofmap.index_map.size_local
+    n_dofs_ghost = V_cg.dofmap.index_map.num_ghosts
+    n_dofs_total = n_dofs_owned + n_dofs_ghost
+
+    n_cells_owned = V0.dofmap.index_map.size_local
+    n_cells_total = n_cells_owned + V0.dofmap.index_map.num_ghosts
+    
+    vertex_to_dof = {}    
+    for c in range(n_cells_local):
+        verts = cell_to_vertex.links(c)
+        dofs  = V_cg.dofmap.cell_dofs(c)
+        for v, d in zip(verts, dofs):
+            vertex_to_dof[int(v)] = int(d)
+            
+    grad_arr = grad_dg0.x.array[:n_cells_total * gdim].reshape(n_cells_total, gdim)
+    Pi_funcs = []    
+
+    for i in range(gdim):
+        num = np.zeros(n_dofs_total)   
+        den = np.zeros(n_dofs_total)
+
+        for v, dof in vertex_to_dof.items():
+            patch_cells = vertex_to_cell.links(v)
+            vols_patch  = vol[patch_cells]
+            grads_patch = grad_arr[patch_cells, i]
+            num[dof] += np.dot(vols_patch, grads_patch)
+            den[dof] += np.sum(vols_patch)
+    
+        Pi_gi = fem.Function(V_cg)
+        arr = Pi_gi.x.array
+        arr[:n_dofs_owned] = (num[:n_dofs_owned]/den[:n_dofs_owned])
+        #owned_mask = den[:n_dofs_owned] > 0.0
+        #arr[:n_dofs_owned][owned_mask] = (num[:n_dofs_owned][owned_mask] / den[:n_dofs_owned][owned_mask])
+        Pi_gi.x.scatter_forward()
+        Pi_funcs.append(Pi_gi)
+    
+    return tuple(Pi_funcs)
+   
 # Simple Poisson same as in tutorial
 domain = mesh.create_unit_square(MPI.COMM_WORLD, 3, 3, mesh.CellType.quadrilateral)
 V = fem.functionspace(domain, ("Lagrange", 1))
 
 uD = fem.Function(V)
 uD.interpolate(lambda x: 1 + x[0] ** 2 + 2 * x[1] ** 2)
-
 tdim = domain.topology.dim
 fdim = tdim - 1
 domain.topology.create_connectivity(fdim, tdim)
@@ -134,10 +217,17 @@ problem = LinearProblem(
 )
 uh = problem.solve()
 
+n_dofs_owned = V.dofmap.index_map.size_local
 # Print for compute_eta
 all_eta = compute_eta(uh, f)
 local_sum_sq  = np.sum(all_eta**2)
 global_sum_sq = domain.comm.allreduce(local_sum_sq, op=MPI.SUM)
+
+# Test to see if ZZ function is Ok
+Pi = compute_zz_grad(uh)
+Pi_gx, Pi_gy = Pi
+print(f"Rank {domain.comm.rank} Pi_gx owned values: {Pi_gx.x.array[:n_dofs_owned]}")
+print(f"Rank {domain.comm.rank} Pi_gy owned values: {Pi_gy.x.array[:n_dofs_owned]}")
 
 if domain.comm.rank == 0:
     print(f"Global estimator = {np.sqrt(global_sum_sq):.6e}")
