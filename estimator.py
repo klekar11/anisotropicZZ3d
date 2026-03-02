@@ -186,7 +186,46 @@ def compute_zz_grad(u_h: fem.Function):
         Pi_funcs.append(Pi_gi)
     
     return tuple(Pi_funcs)
+
+def compute_eta_zz(u_h: fem.Function):
+    domain = u_h.function_space.mesh
+    gdim = domain.geometry.dim
    
+    Pi_funcs = compute_zz_grad(u_h)
+    etas = []
+    for i in range(gdim):
+        eta_i = ufl.grad(u_h)[i] - Pi_funcs[i]
+        etas.append(eta_i)
+    
+    return etas
+
+def compute_G_tilde(u_h: fem.Function):
+    domain = u_h.function_space.mesh
+    gdim = domain.geometry.dim
+    
+    etas = compute_eta_zz(u_h)
+    V0 = fem.functionspace(domain, ("DG", 0))
+    v0 = ufl.TestFunction(V0)
+    n_owned = V0.dofmap.index_map.size_local
+    
+    G = {}
+    for i in range(gdim):
+        for j in range(i, gdim):
+            b = fem.assemble_vector(form(etas[i] * etas[j] * v0 * ufl.dx))
+            b.scatter_reverse(dolfinx.la.InsertMode.add)
+            # store only owned cell values, discard ghost padding
+            G[(i, j)] = b.array[:n_owned].copy()
+    return G
+
+def get_G_matrix(G: dict[tuple[int,int], np.ndarray], K: int, gdim: int) -> np.ndarray:
+    mat = np.zeros((gdim, gdim))
+    for i in range(gdim):
+        for j in range(i, gdim):
+            mat[i, j] = G[(i, j)][K]
+            mat[j, i] = G[(i, j)][K]
+    return mat
+    
+        
 # Simple Poisson same as in tutorial
 domain = mesh.create_unit_square(MPI.COMM_WORLD, 3, 3, mesh.CellType.quadrilateral)
 V = fem.functionspace(domain, ("Lagrange", 1))
@@ -229,11 +268,14 @@ Pi_gx, Pi_gy = Pi
 print(f"Rank {domain.comm.rank} Pi_gx owned values: {Pi_gx.x.array[:n_dofs_owned]}")
 print(f"Rank {domain.comm.rank} Pi_gy owned values: {Pi_gy.x.array[:n_dofs_owned]}")
 
-if domain.comm.rank == 0:
-    print(f"Global estimator = {np.sqrt(global_sum_sq):.6e}")
+G = compute_G_tilde(uh)
+mat = get_G_matrix(G, 0, gdim=2)
+#print(mat)
+#if domain.comm.rank == 0:
+    #print(f"Global estimator = {np.sqrt(global_sum_sq):.6e}")
 
 # Each rank prints its own owned cells (no zeros, correct lengths)
-print(f"Rank {domain.comm.rank}: {all_eta}")
+#print(f"Rank {domain.comm.rank}: {all_eta}")
 
 # Print for compute_eta_k
 #eta_42 = compute_eta_k(uh, f, cell_index=5)
