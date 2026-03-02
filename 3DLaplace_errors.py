@@ -23,8 +23,8 @@ from ufl import (
 )
 import ufl
 import numpy as np
-from estimator import compute_eta
-from error_metrics import compute_error_metrics
+from estimator import compute_eta, compute_gradient_dg0, compute_zz_grad, compute_eta_zz, compute_G_tilde, get_G_matrix
+from error_metrics import compute_error_metrics, compute_error_metrics_ZZ
 
 def u_ex(mod):
     return lambda x: mod.sin(mod.pi * x[0]) * mod.sin(2 * mod.pi * x[1]) * mod.sin(mod.pi * x[2])
@@ -73,10 +73,14 @@ for i, N in enumerate(Ns):
     local_sum_sq = np.sum(all_eta**2)
     global_sum_sq = domain.comm.allreduce(local_sum_sq, op=MPI.SUM)
     eta = np.sqrt(global_sum_sq)
-
+    
     TRE, ERE, EI = compute_error_metrics(uh, u_numpy, eta, degree_raise=3)
+    
+    # Test zz estimator
+    G = compute_G_tilde(uh)
+    ERE_ZZ, EI_ZZ = compute_error_metrics_ZZ(uh, u_numpy, G, degree_raise=3)
 
     hs[i] = 1.0 / N
 
     if comm.rank == 0:
-        print(f"h: {hs[i]:.2e}  TRE: {TRE:.2e}  ERE: {ERE:.2e}  EI: {EI:.6f}")
+        print(f"h: {hs[i]:.2e}  TRE: {TRE:.2e}  ERE: {ERE:.2e}  EI: {EI:.6f}   ERE_ZZ: {ERE_ZZ:.2e}     EI_ZZ: {EI_ZZ:.3f}")
