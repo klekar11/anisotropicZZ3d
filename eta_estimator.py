@@ -142,7 +142,7 @@ def get_G_matrix(G: dict[tuple[int,int], np.ndarray], K: int, gdim: int) -> np.n
             
     return mat
 
-def compute_jacobian_svd(msh: mesh.Mesh) -> np.ndarray:
+def compute_jacobian_svd(msh: mesh.Mesh) -> dict:
 
     tdim = msh.topology.dim
     msh.topology.create_connectivity(tdim, 0)
@@ -165,3 +165,88 @@ def compute_jacobian_svd(msh: mesh.Mesh) -> np.ndarray:
     V_v = fem.functionspace(msh, vector_el)
     V_t = fem.functionspace(msh, tensor_el)
 
+    M_k = fem.Function(V_t, name = "M_k")
+    lam = [fem.Function(V_s, name = f"lambda_{i}") for i in range(tdim)]
+    r = [fem.Function(V_v, name = f"r_{i}") for i in range(tdim)]
+    AR = fem.Function(V_s, name = "AR")
+
+    J_arr = np.empty((n_cells, tdim, tdim))
+    lam_arr = np.empty((n_cells, tdim))
+    r_arr = np.empty((n_cells, tdim, tdim))
+
+    for c in range(n_cells):
+
+        pts = coords[conn.links(c)]
+        J = (pts[1:] - pts[0]).T
+        J_arr[c] = J
+        U, Sigma, _ = np.linalg.svd(J)
+        lam_arr[c] = Sigma
+        r_arr[c] = U.T
+
+    AR_arr = lam_arr[:, 0] / lam_arr[:, -1]
+
+    M_k.x.array[:] = J_arr.ravel()
+    for i in range(tdim):
+        lam[i].x.array[:] = lam_arr[:, i]
+        r[i].x.array[:] = r_arr[:, i, :].ravel()
+    AR.x.array[:] = AR_arr
+
+    return {"M_k": M_k, "lambda": lam, "r": r, "AR": AR}
+
+def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr.Expr | None = None) -> np.ndarray:
+
+    G = compute_G_tilde(u_h)
+    domain = u_h.function_space.mesh
+    tdim = domain.topology.dim
+
+    V0 = fem.functionspace(domain, ("DG", 0))
+    v0 = ufl.TestFunction(V0)
+    n = ufl.FacetNormal(domain)
+                                                   
+    
+    svd = compute_jacobian_svd(domain)
+    lam = svd["lambda"]
+    r_vecs = svd["r"]
+    
+    # Residual term
+    R_K = ufl.div(ufl.grad(u_h)) + f                                                  
+    b1 = fem.assemble_vector(form(ufl.inner(R_K, R_K) * v0 * ufl.dx))
+    res_norm = np.sqrt(b1.array)
+    
+    lam_arr = np.stack([lam[i].x.array for i in range(tdim)], axis=1)
+    r_arr = np.stack([r_vecs[i].x.array.reshape(-1, tdim) for i in range(tdim)], axis=1)
+
+    # Gradient jump term -> internal edges
+    jump_n = ufl.jump(ufl.grad(u_h), n)
+    b2 = fem.assemble_vector(form(ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS))
+    jump_norm = np.sqrt(b2.array)
+    lam_min = lam_arr[:, -1]
+    jump_norm /= (2 * np.sqrt(lam_min))
+
+    # Boundary term -> if it exists
+    if g_N is not None:
+        neumann_res = ufl.dot(ufl.grad(u_h), n) - g_N
+        b3 = fem.assemble_vector(form(ufl.inner(neumann_res, neumann_res) * v0 * ufl.ds))
+        bound_norm = np.sqrt(b3.array)
+        bound_norm /= (2 * np.sqrt(lam_min))
+    else:
+        # pure Dirichlet: boundary contribution is exactly zero
+        bound_norm = np.zeros_like(b2.array)
+
+    res1 = res_norm + jump_norm + bound_norm
+
+    # Compute Omega_k term
+    n_cells = V0.dofmap.index_map.size_local
+    omega_sq = np.zeros(n_cells)
+    for i in range(tdim):
+        q_i = np.zeros(n_cells)
+        r_vec = r_arr[:, i, :]
+        for j in range(tdim):
+            for k in range(j, tdim):
+                factor = 1 if j == k else 2
+                q_i += factor * r_vec[:, j] * r_vec[:, k] * G[(j, k)]
+        omega_sq += lam_arr[:, i]**2 * q_i
+
+    omega_tilde = np.sqrt(omega_sq)
+
+    return res1 * omega_tilde
