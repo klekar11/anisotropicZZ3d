@@ -1,1 +1,9 @@
 *.png
+*.mesh
+*.sol
+*.vtu
+mmg_tests/cube_results
+mmg_tests/cube_bands_results
+parallel/
+tests/results
+
