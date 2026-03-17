@@ -224,7 +224,8 @@ def generate_initial_mesh(coarse_path, output_path, hmax=0.1):
     run_mmg3d([
         "-in",    coarse_path,
         "-out",   output_path,
-        "-hmax",  hmax 
+        "-hmax",  hmax,
+        "-hgrad", -1
     ])
     nv = read_num_vertices(output_path)
     print(f"Generated initial mesh with {nv} vertices.")
@@ -239,7 +240,8 @@ def adapt_mesh(input_path, output_path, M):
     run_mmg3d([
         "-in",    input_path,
         "-sol",   sol_path,
-        "-out",   output_path
+        "-out",   output_path,
+        "-hgrad", -1
     ])
 
     nv_in  = read_num_vertices(input_path)
@@ -285,9 +287,9 @@ def main():
     
 
     STAGES = [
-    np.diag([1/H_X**2, 1/H_Y**2, 1/0.01**2]), # step 1: h_z = 0.08
-    np.diag([1/H_X**2, 1/H_Y**2, 1/0.04**2]),  # step 2: h_z = 0.04
-    np.diag([1/H_X**2, 1/H_Y**2, 1/0.02**2]),  # step 3: h_z = 0.02
+    #np.diag([1/H_X**2, 1/H_Y**2, 1/0.08**2]), # step 1: h_z = 0.08
+    #np.diag([1/H_X**2, 1/H_Y**2, 1/0.04**2]),  # step 2: h_z = 0.04
+    #np.diag([1/H_X**2, 1/H_Y**2, 1/0.02**2]),  # step 3: h_z = 0.02
     np.diag([1/H_X**2, 1/H_Y**2, 1/H_Z**2])   # step 4: h_z = 0.01 (target)
     ]
 
