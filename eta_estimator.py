@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false, reportMissingModuleSource=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportAssignmentType=false, reportCallIssue=false, reportGeneralTypeIssues=false, reportIndexIssue=false, reportOperatorIssue=false, reportReturnType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownLambdaType=false
 import numpy as np
 import dolfinx
 from dolfinx import fem, mesh, default_scalar_type
@@ -6,7 +7,7 @@ from dolfinx.fem.petsc import LinearProblem
 import ufl
 import basix.ufl
 
-def compute_iso_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr.Expr | None = None) -> np.ndarray:
+def compute_iso_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr.Expr | None = None) -> np.ndarray: # type: ignore
     
     domain = u_h.function_space.mesh
     tdim = domain.topology.dim
@@ -19,12 +20,12 @@ def compute_iso_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr
     n = ufl.FacetNormal(domain)
 
     R_K = ufl.div(ufl.grad(u_h)) + f
-    b1 = fem.assemble_vector(form(h**2 * ufl.inner(R_K, R_K) * v0 * ufl.dx))
+    b1 = fem.assemble_vector(form(h**2 * ufl.inner(R_K, R_K) * v0 * ufl.dx)) # pyright: ignore[reportOperatorIssue]
 
     h_K = h('+')
     jump_n = ufl.jump(ufl.grad(u_h), n)
     b2 = fem.assemble_vector(
-        form(0.25 * h_K * ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS)
+        form(0.25 * h_K * ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS) # type: ignore
     )
 
     if g_N is not None:
@@ -94,8 +95,8 @@ def compute_zz_grad(u_h: fem.Function):
             patch_cells = vertex_to_cell.links(v)
             vols_patch = vol[patch_cells]
             grads_patch = grad_arr[patch_cells, i]
-            num[dof]   += np.dot(vols_patch, grads_patch)
-            den[dof]   += np.sum(vols_patch)
+            num[dof] += np.dot(vols_patch, grads_patch)
+            den[dof] += np.sum(vols_patch)
         Pi_gi = fem.Function(V_cg)
         Pi_gi.x.array[:] = num / den
         Pi_funcs.append(Pi_gi)
@@ -115,7 +116,7 @@ def compute_eta_zz(u_h: fem.Function):
         
     return etas
 
-def compute_G_tilde(u_h: fem.Function):
+def compute_G_tilde(u_h: fem.Function) -> dict[tuple[int, int], np.ndarray]:
 
     domain = u_h.function_space.mesh
     gdim = domain.geometry.dim
@@ -141,6 +142,101 @@ def get_G_matrix(G: dict[tuple[int,int], np.ndarray], K: int, gdim: int) -> np.n
             mat[j, i] = G[(i, j)][K]
             
     return mat
+
+
+def compute_G_P(
+    u_h: fem.Function,
+    G: dict[tuple[int, int], np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    domain = u_h.function_space.mesh
+    tdim = domain.topology.dim
+    gdim = domain.geometry.dim
+
+    domain.topology.create_entities(0)
+    domain.topology.create_connectivity(tdim, 0)
+    cell_to_vertex = domain.topology.connectivity(tdim, 0)
+
+    n_cells = domain.topology.index_map(tdim).size_local
+    n_vertices = domain.topology.index_map(0).size_local
+
+    if G is None:
+        G = compute_G_tilde(u_h)
+
+    vertex_sums = np.zeros((n_vertices, gdim, gdim))
+    for cell in range(n_cells):
+        G_k = get_G_matrix(G, cell, gdim)
+        for vertex in cell_to_vertex.links(cell):
+            vertex_sums[vertex] += G_k
+
+    # Eigenvectors of each vertex patch G-tilde sum; columns of Q[p] are eigenvectors
+    Q = np.zeros((n_vertices, gdim, gdim))
+    for p in range(n_vertices):
+        _, Q[p] = np.linalg.eigh(vertex_sums[p])
+
+    return vertex_sums, Q
+
+
+def compute_sigma_P(
+    u_h: fem.Function,
+    eta_k_i: np.ndarray,
+) -> np.ndarray:
+    
+    domain = u_h.function_space.mesh
+    tdim = domain.topology.dim
+
+    domain.topology.create_entities(0)
+    domain.topology.create_connectivity(tdim, 0)
+    cell_to_vertex = domain.topology.connectivity(tdim, 0)
+
+    n_cells = domain.topology.index_map(tdim).size_local
+    n_vertices = domain.topology.index_map(0).size_local
+
+    numerator = np.zeros(n_vertices)
+    denominator = np.zeros(n_vertices)
+
+    for K in range(n_cells):
+        eta_i_K = eta_k_i[:, K]                    # shape (tdim,)
+        num_contrib = np.sum(eta_i_K ** 2)
+        den_contrib = np.sqrt(np.sum(eta_i_K ** 4))
+        for P in cell_to_vertex.links(K):
+            numerator[P]   += num_contrib
+            denominator[P] += den_contrib
+
+    return numerator / denominator
+
+
+def compute_lambda_P(
+    u_h: fem.Function,
+    svd: dict | None = None,
+) -> np.ndarray:
+
+    domain = u_h.function_space.mesh
+    tdim = domain.topology.dim
+
+    domain.topology.create_entities(0)
+    domain.topology.create_connectivity(tdim, 0)
+    cell_to_vertex = domain.topology.connectivity(tdim, 0)
+
+    n_cells = domain.topology.index_map(tdim).size_local
+    n_vertices = domain.topology.index_map(0).size_local
+
+    if svd is None:
+        svd = compute_jacobian_svd(domain)
+
+    lam = svd["lambda"]
+    lam_arr = np.stack([lam[i].x.array for i in range(tdim)], axis=1)  # (n_cells, tdim)
+
+    h_sum = np.zeros((n_vertices, tdim))
+    count = np.zeros(n_vertices, dtype=int)
+
+    for K in range(n_cells):
+        for P in cell_to_vertex.links(K):
+            h_sum[P] += lam_arr[K]
+            count[P] += 1
+
+    return h_sum / count[:, None]  # shape (n_vertices, tdim)
+
 
 def compute_jacobian_svd(msh: mesh.Mesh) -> dict:
 
@@ -207,7 +303,7 @@ def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.c
     svd = compute_jacobian_svd(domain)
     lam = svd["lambda"]
     r_vecs = svd["r"]
-    
+
     # Residual term
     R_K = ufl.div(ufl.grad(u_h)) + f                                                  
     b1 = fem.assemble_vector(form(ufl.inner(R_K, R_K) * v0 * ufl.dx))
@@ -238,6 +334,7 @@ def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.c
     # Compute Omega_k term
     n_cells = V0.dofmap.index_map.size_local
     omega_sq = np.zeros(n_cells)
+    omegas = np.zeros((tdim, n_cells))
     for i in range(tdim):
         q_i = np.zeros(n_cells)
         r_vec = r_arr[:, i, :]
@@ -245,8 +342,10 @@ def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.c
             for k in range(j, tdim):
                 factor = 1 if j == k else 2
                 q_i += factor * r_vec[:, j] * r_vec[:, k] * G[(j, k)]
-        omega_sq += lam_arr[:, i]**2 * q_i
+        omegas[i] = lam_arr[:, i] * np.sqrt(q_i)
+        omega_sq += omegas[i]**2
 
     omega_tilde = np.sqrt(omega_sq)
+    eta_K = res1 * omega_tilde
 
-    return res1 * omega_tilde
+    return eta_K, res1, omegas

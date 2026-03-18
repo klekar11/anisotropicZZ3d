@@ -1,4 +1,6 @@
 import numpy as np
+import sys
+from pathlib import Path
 import ufl
 from ufl import SpatialCoordinate, TestFunction, TrialFunction, div, grad, inner, dx
 from mpi4py import MPI
@@ -6,6 +8,10 @@ from dolfinx import default_scalar_type, fem
 from dolfinx.fem import functionspace, Function, form, dirichletbc, locate_dofs_topological
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx.mesh import create_unit_square, locate_entities_boundary, create_unit_cube
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from eta_estimator import (compute_iso_eta, compute_G_tilde,
                        compute_anisotropic_eta)
@@ -95,7 +101,9 @@ for N1, N2, N3 in configs:
     EI_ZZs.append(EI_ZZ)
 
     # --- anisotropic estimator ---
-    eta_a_cells = compute_anisotropic_eta(uh, f)
+    eta_a_cells, res1, omegas = compute_anisotropic_eta(uh, f)
+    eta_from_components = np.sqrt(np.sum((np.asarray(res1)[None, :] * np.asarray(omegas))**2, axis=0))
+    assert np.max(np.abs(eta_from_components - np.asarray(eta_a_cells))) < 1e-4
     eta_a = np.sqrt(np.sum(eta_a_cells))
     EI_a = eta_a / norm_grad_e
     EI_as.append(EI_a)
