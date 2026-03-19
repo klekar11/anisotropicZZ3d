@@ -238,6 +238,60 @@ def compute_lambda_P(
     return h_sum / count[:, None]  # shape (n_vertices, tdim)
 
 
+def adapt_h(
+    msh,
+    eta_k_i: np.ndarray,
+    u_h: fem.Function,
+    TOL: float,
+    lambda_p: np.ndarray,
+    ALPHA: float,
+    correction_factor: float,
+    sigma_p: np.ndarray,
+) -> np.ndarray:
+
+    tdim = msh.topology.dim
+    gdim = msh.geometry.dim
+    n_verts = msh.topology.index_map(0).size_local
+
+    energy_sq = fem.assemble_scalar(form(ufl.inner(ufl.grad(u_h), ufl.grad(u_h)) * ufl.dx))
+
+    msh.topology.create_entities(0)
+    msh.topology.create_connectivity(tdim, 0)
+    msh.topology.create_connectivity(0, tdim)
+    vertex_to_cell = msh.topology.connectivity(0, tdim)
+
+    eta_i_at_P = np.zeros((gdim, n_verts))
+    for P in range(n_verts):
+        cells_of_P = vertex_to_cell.links(P)
+        for i in range(gdim):
+            eta_i_at_P[i, P] = np.sum(eta_k_i[i, cells_of_P])
+
+    h_p = lambda_p.copy()
+
+    for i_dir in range(gdim):
+        coeff = (4.0 * sigma_p) / (3.0 * n_verts)
+        lower = coeff * ((1 - ALPHA) ** 2) * (TOL ** 2) * energy_sq
+        upper = coeff * ((1 + ALPHA) ** 2) * (TOL ** 2) * energy_sq
+        eta_sum = eta_i_at_P[i_dir, :]
+
+        ok_mask = (lower <= eta_sum) & (eta_sum <= upper)
+        n_ok = int(np.sum(ok_mask))
+
+        coarsen = lower > eta_sum
+        h_p[coarsen, i_dir] = correction_factor * lambda_p[coarsen, i_dir]
+
+        refine = eta_sum > upper
+        h_p[refine, i_dir] = lambda_p[refine, i_dir] / correction_factor
+
+        print(
+            f"  Dir {i_dir + 1}:  satisfied {n_ok}/{n_verts} "
+            f"({100 * n_ok / n_verts:.1f}%),  "
+            f"coarsen {int(np.sum(coarsen))},  refine {int(np.sum(refine))}"
+        )
+
+    return h_p
+
+
 def compute_jacobian_svd(msh: mesh.Mesh) -> dict:
 
     tdim = msh.topology.dim

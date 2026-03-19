@@ -4,28 +4,51 @@ import dolfinx
 from dolfinx.io import gmsh as gmshio
 from dolfinx.mesh import exterior_facet_indices
 import numpy as np
+import basix.ufl
 from mpi4py import MPI
 import subprocess
 from pathlib import Path
 import numpy as np
+from scipy.spatial import cKDTree
+
+# def read_medit_to_dolfinx(path: str) -> dolfinx.mesh.Mesh:
+#     gmsh.initialize()
+#     gmsh.option.setNumber("General.Verbosity", 0)
+#     gmsh.open(path)
+
+#     # MMG .mesh files have no physical groups, but model_to_mesh needs them.
+#     # Tag all 3D entities as a single physical group.
+#     volumes = gmsh.model.getEntities(dim=3)
+#     if volumes:
+#         vol_tags = [v[1] for v in volumes]
+#         gmsh.model.addPhysicalGroup(3, vol_tags, tag=1)
+
+#     mesh_data = gmshio.model_to_mesh(gmsh.model, MPI.COMM_SELF, rank=0, gdim=3)
+#     gmsh.finalize()
+#     return mesh_data.mesh
 
 def read_medit_to_dolfinx(path: str) -> dolfinx.mesh.Mesh:
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Verbosity", 0)
-    gmsh.open(path)
+    m = meshio.read(path)
+    tets = m.cells_dict.get("tetra")
+    if tets is None:
+        raise ValueError("No tetrahedra found in the mesh file.")
 
-    # MMG .mesh files have no physical groups, but model_to_mesh needs them.
-    # Tag all 3D entities as a single physical group.
-    volumes = gmsh.model.getEntities(dim=3)
-    if volumes:
-        vol_tags = [v[1] for v in volumes]
-        gmsh.model.addPhysicalGroup(3, vol_tags, tag=1)
+    # Force contiguous arrays with correct dtypes
+    points = np.ascontiguousarray(m.points[:, :3], dtype=np.float64)
+    cells  = np.ascontiguousarray(tets, dtype=np.int64)
 
-    mesh_data = gmshio.model_to_mesh(gmsh.model, MPI.COMM_SELF, rank=0, gdim=3)
-    gmsh.finalize()
-    return mesh_data.mesh
+    coord_element = basix.ufl.element(
+        "Lagrange", "tetrahedron", 1, shape=(3,)
+    )
+    msh = dolfinx.mesh.create_mesh(
+        MPI.COMM_SELF, cells, coord_element, points
+    )
+    return msh
 
-
+def build_dolfinx_to_medit_map(msh):
+    """Return perm such that M_reordered[perm[i]] = M_dolfinx[i].
+    Uses the built-in input_global_indices provided by DOLFINx."""
+    return msh.geometry.input_global_indices
 
 def write_metric_sol(mesh_path: Path | str, M_all: np.ndarray, sol_path: Path | str | None = None,) -> Path:
 
@@ -185,6 +208,70 @@ def adapt_mesh(input_path, output_path, M, hgrad, hmin, hmax, mmg_exe):
     print(f"Adapted mesh from {nv_in} to {nv_out} vertices.")
 
     return output_path
+
+
+def build_metric(
+    h_p: np.ndarray,
+    Q: np.ndarray,
+    perm: np.ndarray,
+    mesh_path: Path | str,
+    sol_path: Path | str,
+) -> Path:
+
+    n_verts = h_p.shape[0]
+    M_all = np.zeros((n_verts, 3, 3))
+    for P in range(n_verts):
+        D = np.diag(1.0 / h_p[P] ** 2)
+        Q_P = Q[P]
+        M_all[P] = Q_P.T @ D @ Q_P
+
+    M_reordered = np.zeros_like(M_all)
+    for i in range(n_verts):
+        M_reordered[perm[i]] = M_all[i]
+
+    return write_metric_sol(mesh_path, M_reordered, sol_path)
+
+
+def adapt_mesh_mmg(
+    input_path: Path | str,
+    output_path: Path | str,
+    sol_path: Path | str,
+    mmg_log_file: Path | str,
+    mmg_exe: str,
+    hgrad: float,
+    hmin: float,
+    hmax: float,
+) -> tuple[str, str | None]:
+
+    cmd = [
+        mmg_exe,
+        "-in", str(input_path),
+        "-sol", str(sol_path),
+        "-out", str(output_path),
+        "-hgrad", str(hgrad),
+        "-hmin", str(hmin),
+        "-hmax", str(hmax),
+    ]
+    print(f"  Command: {' '.join(cmd)}")
+
+    with open(mmg_log_file, "a") as log_f:
+        log_f.write(f"\n{'=' * 70}\n")
+        log_f.write(f"ADAPT {Path(input_path).name} -> {Path(output_path).name}\n")
+        log_f.write(f"{'=' * 70}\n")
+        result = subprocess.run(
+            cmd, stdout=log_f, stderr=subprocess.STDOUT, text=True
+        )
+
+    if result.returncode != 0:
+        print(f"  WARNING: MMG3D returned code {result.returncode}")
+    else:
+        print("  MMG3D completed successfully")
+
+    vtu_path = to_vtu(str(output_path))
+    if vtu_path:
+        print(f"  VTU saved: {Path(vtu_path).name}")
+
+    return str(output_path), vtu_path
 
 def to_vtu(mesh_path):
     try:

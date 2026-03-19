@@ -7,3 +7,4 @@ mmg_tests/cube_bands_results
 parallel/
 tests/results
 __pycache__
+poisson_cube/results
