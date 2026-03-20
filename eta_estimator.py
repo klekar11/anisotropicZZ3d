@@ -116,22 +116,40 @@ def compute_eta_zz(u_h: fem.Function):
         
     return etas
 
-def compute_G_tilde(u_h: fem.Function) -> dict[tuple[int, int], np.ndarray]:
+def compute_G_tilde(
+    u_h: fem.Function,
+) -> tuple[dict[tuple[int, int], np.ndarray], fem.Function]:
+    """Compute per-cell G̃_K matrices and the ZZ error as a storable Function.
 
+    Returns
+    -------
+    G : dict
+        Mapping ``(i, j) -> array(n_cells)`` of G̃_K matrix entries.
+    eta_zz_fn : fem.Function
+        DG0 vector function representing ``grad(u_h) - Pi_h(grad(u_h))``
+        (the ZZ gradient error), stored for later I/O.
+    """
     domain = u_h.function_space.mesh
     gdim = domain.geometry.dim
-    etas = compute_eta_zz(u_h)
+    etas = compute_eta_zz(u_h)  # list of gdim UFL expressions: grad(u_h)[i] - Pi_h[i]
     V0 = fem.functionspace(domain, ("DG", 0))
     v0 = ufl.TestFunction(V0)
     n_cells = V0.dofmap.index_map.size_local
-    
+
     G = {}
     for i in range(gdim):
         for j in range(i, gdim):
             b = fem.assemble_vector(form(etas[i] * etas[j] * v0 * ufl.dx))
             G[(i, j)] = b.array[:n_cells].copy()
-            
-    return G
+
+    # Build a storable DG0 vector Function for eta_zz
+    dg0_vec_el = basix.ufl.element("DG", domain.topology.cell_name(), 0, shape=(gdim,))
+    V_dg0_vec = fem.functionspace(domain, dg0_vec_el)
+    eta_zz_fn = fem.Function(V_dg0_vec, name="eta_zz")
+    eta_zz_expr = ufl.as_vector([etas[i] for i in range(gdim)])
+    eta_zz_fn.interpolate(fem.Expression(eta_zz_expr, V_dg0_vec.element.interpolation_points))
+
+    return G, eta_zz_fn
 
 def get_G_matrix(G: dict[tuple[int,int], np.ndarray], K: int, gdim: int) -> np.ndarray:
 
@@ -161,7 +179,7 @@ def compute_G_P(
     n_vertices = domain.topology.index_map(0).size_local
 
     if G is None:
-        G = compute_G_tilde(u_h)
+        G, _ = compute_G_tilde(u_h)
 
     vertex_sums = np.zeros((n_vertices, gdim, gdim))
     for cell in range(n_cells):
@@ -345,7 +363,7 @@ def compute_jacobian_svd(msh: mesh.Mesh) -> dict:
 
 def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr.Expr | None = None) -> np.ndarray:
 
-    G = compute_G_tilde(u_h)
+    G, _ = compute_G_tilde(u_h)
     domain = u_h.function_space.mesh
     tdim = domain.topology.dim
 
@@ -395,7 +413,7 @@ def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.c
         for j in range(tdim):
             for k in range(j, tdim):
                 factor = 1 if j == k else 2
-                q_i += factor * r_vec[:, j] * r_vec[:, k] * G[(j, k)]
+                q_i += factor * r_vec[:, j] * r_vec[:, k] * G[j, k]
         omegas[i] = lam_arr[:, i] * np.sqrt(q_i)
         omega_sq += omegas[i]**2
 

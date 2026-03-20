@@ -8,3 +8,5 @@ parallel/
 tests/results
 __pycache__
 poisson_cube/results
+poisson_cube/mesh_reorder.py
+

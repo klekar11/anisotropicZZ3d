@@ -241,6 +241,7 @@ def adapt_mesh_mmg(
     hgrad: float,
     hmin: float,
     hmax: float,
+    vtk_dir: Path | str | None = None,
 ) -> tuple[str, str | None]:
 
     cmd = [
@@ -267,13 +268,67 @@ def adapt_mesh_mmg(
     else:
         print("  MMG3D completed successfully")
 
-    vtu_path = to_vtu(str(output_path))
+    vtu_path = to_vtu(str(output_path), output_dir=vtk_dir)
     if vtu_path:
         print(f"  VTU saved: {Path(vtu_path).name}")
 
     return str(output_path), vtu_path
 
-def to_vtu(mesh_path):
+
+def save_computed_quantities(
+    compute_errs_dir: Path | str,
+    u_h,
+    grad_uh,
+    eta_k: np.ndarray,
+    eta_zz_fn,
+    time: float = 0.0,
+) -> None:
+    """Persist solution quantities to an ADIOS2 BP4 checkpoint.
+
+    Parameters
+    ----------
+    compute_errs_dir :
+        Directory where ``computed_quantities.bp`` will be written.
+    u_h :
+        FEM solution Function.
+    grad_uh :
+        DG0 vector Function holding ``grad(u_h)``.
+    eta_k :
+        1-D numpy array of cell-wise anisotropic error indicator values.
+    eta_zz_fn :
+        DG0 vector Function for the ZZ gradient error ``grad(u_h) - Pi_h(grad(u_h))``.
+    time :
+        Pseudo-time stamp stored in the checkpoint (default 0.0).
+    """
+    import adios4dolfinx
+    import adios2
+    from dolfinx import fem as _fem
+
+    out_dir = Path(compute_errs_dir)
+    out_dir.mkdir(exist_ok=True, parents=True)
+
+    mesh = u_h.function_space.mesh
+
+    # Wrap the raw numpy array in a DG0 scalar Function for storage
+    V_eta = _fem.functionspace(mesh, ("DG", 0))
+    eta_k_fn = _fem.Function(V_eta, name="eta_k")
+    eta_k_fn.x.array[:] = eta_k
+
+    filename = out_dir / "computed_quantities.bp"
+
+    # Write mesh first (creates / overwrites the BP4 file)
+    adios4dolfinx.write_mesh(filename, mesh, mode=adios2.Mode.Write)
+    # Append each function to the same file
+    adios4dolfinx.write_function(filename, u_h,        mode=adios2.Mode.Append, time=time, name="u")
+    adios4dolfinx.write_function(filename, grad_uh,    mode=adios2.Mode.Append, time=time, name="grad_u")
+    adios4dolfinx.write_function(filename, eta_k_fn,   mode=adios2.Mode.Append, time=time, name="eta_k")
+    adios4dolfinx.write_function(filename, eta_zz_fn,  mode=adios2.Mode.Append, time=time, name="eta_zz")
+
+    print(f"  Saved computed quantities → {filename}")
+
+def to_vtu(mesh_path, output_dir=None):
+    """Convert a Medit .mesh file to VTU.  If *output_dir* is given the VTU is
+    placed there instead of next to the source mesh."""
     try:
         import meshio
     except ImportError:
@@ -281,7 +336,10 @@ def to_vtu(mesh_path):
         print("          Or open .mesh files directly in ParaView ≥ 5.10")
         return None
 
-    vtu_path = mesh_path.replace(".mesh", ".vtu")
+    if output_dir is not None:
+        vtu_path = str(Path(output_dir) / Path(mesh_path).with_suffix(".vtu").name)
+    else:
+        vtu_path = mesh_path.replace(".mesh", ".vtu")
     mesh = meshio.read(mesh_path)
 
     # Keep only tetrahedral cells (discard any lower-dim leftovers)
