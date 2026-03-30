@@ -27,9 +27,9 @@ def compute_error_norms(uh: fem.Function, u_numpy: Callable[[np.ndarray], np.nda
 
 def compute_error_metrics(uh, u_numpy, eta, degree_raise= 3) -> Tuple[float, float, float]:
     
-    norm_grad_e, norm_grad_u, norm_grad_uh = compute_error_norms(uh, u_numpy, degree_raise) 
+    norm_grad_e, _, norm_grad_uh = compute_error_norms(uh, u_numpy, degree_raise) 
     
-    TRE = norm_grad_e / norm_grad_u
+    TRE = norm_grad_e / norm_grad_uh
     ERE = eta / norm_grad_uh
     EI  = eta / norm_grad_e
     

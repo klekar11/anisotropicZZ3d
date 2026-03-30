@@ -214,6 +214,19 @@ def run_adaptive_poisson(
         build_metric(h_p, Q, perm, mesh_path, sol_path)
         print(f"  Metric → {Path(sol_path).name}")
 
+        export_solution = True
+        vtu_path = to_vtu(
+            mesh_path,
+            output_dir=vtk_dir,
+            write_solution=export_solution,
+            u_h=u_h,
+            dof_to_medit=perm,
+        )
+        if vtu_path and export_solution:
+            print(f"  VTU (+u_h) saved: {Path(vtu_path).name}")
+        elif vtu_path:
+            print(f"  VTU (mesh only) saved: {Path(vtu_path).name}")
+
         # ---- Step 7: MMG adaptation (skip on last iteration) ------
         if loop_idx < n_loop - 1:
             print("\n[7] Running MMG3D...")
