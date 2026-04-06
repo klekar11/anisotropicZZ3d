@@ -251,8 +251,7 @@ def adapt_mesh_mmg(
         "-out", str(output_path),
         "-hgrad", str(hgrad),
         "-hmin", str(hmin),
-        "-hmax", str(hmax),
-        "-nosurf"
+        "-hmax", str(hmax)
     ]
     print(f"  Command: {' '.join(cmd)}")
 

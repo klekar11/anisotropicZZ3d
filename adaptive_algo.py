@@ -17,7 +17,7 @@ from mesh_helpers import (
     adapt_mesh_mmg,
     save_computed_quantities,
 )
-from eta_estimator import (
+from eta_estimator1 import (
     compute_jacobian_svd,
     adapt_h,
     compute_anisotropic_eta,
@@ -214,7 +214,8 @@ def run_adaptive_poisson(
         build_metric(h_p, Q, perm, mesh_path, sol_path)
         print(f"  Metric → {Path(sol_path).name}")
 
-        export_solution = True
+        # Attach u_h to VTU explicitly on the final loop.
+        export_solution = (loop_idx == n_loop - 1)
         vtu_path = to_vtu(
             mesh_path,
             output_dir=vtk_dir,

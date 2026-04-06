@@ -1,5 +1,7 @@
 import numpy as np
 import ufl
+from pathlib import Path
+import sys
 from ufl import (SpatialCoordinate, TestFunction, TrialFunction,
                  div, dot, dx, grad, inner)
 from mpi4py import MPI
@@ -9,9 +11,11 @@ from dolfinx.fem import (Expression, Function, functionspace,
                           locate_dofs_topological)
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx.mesh import create_unit_cube, create_unit_square, locate_entities_boundary
-
-from eta_estimator import compute_iso_eta, compute_gradient_dg0, compute_zz_grad, compute_eta_zz, compute_G_tilde, get_G_matrix
-from error_metrics import compute_error_metrics, compute_error_metrics_ZZ
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from eta_estimator import compute_iso_eta, compute_G_tilde, compute_anisotropic_eta
+from error_metrics import compute_error_metrics, compute_error_metrics_ZZ, compute_error_norms
 
 
 def u_ex(mod):
@@ -45,7 +49,7 @@ def solve_poisson(N: int = 8, degree: int = 1):
 
 Ns = [4, 8, 16, 32]
 hs = np.zeros(len(Ns), dtype = np.float64)
-TREs, EREs, EIs, ERE_ZZs, EI_ZZs = [], [], [], [], []
+TREs, EREs, EIs, EI_As, ERE_ZZs, EI_ZZs = [], [], [], [], [], []
 
 for i, N in enumerate(Ns):
     uh, u_ex_ufl = solve_poisson(N, degree = 1)
@@ -56,31 +60,37 @@ for i, N in enumerate(Ns):
     # --- residual estimator ---
     eta = compute_iso_eta(uh, f)
     all_eta = np.sqrt(np.sum(eta**2))
+    norm_grad_e, norm_grad_u, norm_grad_uh = compute_error_norms(uh, u_numpy, degree_raise = 3)    
     TRE, ERE, EI = compute_error_metrics(uh, u_numpy, all_eta, degree_raise = 3)
 
     # --- ZZ estimator ---
-    G = compute_G_tilde(uh)
+    G, eta_zz_fn = compute_G_tilde(uh)
     ERE_ZZ, EI_ZZ = compute_error_metrics_ZZ(uh, u_numpy, G, degree_raise = 3)
+    eta_a_cells, res1, omegas = compute_anisotropic_eta(uh, f)
+    eta_a = np.sqrt(np.sum(eta_a_cells))
+    EI_A = eta_a / norm_grad_e
 
     TREs.append(TRE)
     EREs.append(ERE)
     EIs.append(EI)
+    EI_As.append(EI_A)
     ERE_ZZs.append(ERE_ZZ)
     EI_ZZs.append(EI_ZZ)
     hs[i] = 1.0 / N
-    print(f"N = {N} done: eta = {all_eta:.3e}  TRE = {TRE:.3e}  EI = {EI:.3f}")
+    print(f"N = {N} done: eta_a = {eta_a:.3e} eta = {all_eta:.3e}  TRE = {TRE:.3e}  EI = {EI:.3f}")
 
 TREs = np.array(TREs)
 EREs = np.array(EREs)
 EIs = np.array(EIs)
+EI_As = np.array(EI_As)
 ERE_ZZs = np.array(ERE_ZZs)
 EI_ZZs = np.array(EI_ZZs)
 
 # no comm.rank guard: single process always prints
 print(f"\n{'h':>10} {'TRE':>10} {'p_TRE':>7} "
-      f"{'ERE':>10} {'p_ERE':>7} {'EI':>8} "
+      f"{'ERE':>10} {'p_ERE':>7} {'EI':>8} {'EI_A':>8} "
       f"{'ERE_ZZ':>10} {'p_ZZ':>7} {'EI_ZZ':>8}")
-print("-" *85)
+print("-" *95)
 
 for i in range(len(hs)):
     if i == 0:
@@ -95,5 +105,6 @@ for i in range(len(hs)):
           f"{TREs[i]:>10.2e} {p_TRE:>7.2f} "
           f"{EREs[i]:>10.2e} {p_ERE:>7.2f} "
           f"{EIs[i]:>8.4f} "
+          f"{EI_As[i]:>8.4f} "
           f"{ERE_ZZs[i]:>10.2e} {p_ZZ:>7.2f} "
           f"{EI_ZZs[i]:>8.4f}")

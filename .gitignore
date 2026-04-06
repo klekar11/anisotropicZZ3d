@@ -7,9 +7,10 @@ mmg_tests/cube_bands_results
 parallel/
 tests/results
 __pycache__
-poisson_cube/results
+poisson_cube/results*
 poisson_cube/mesh_reorder.py
 
 poisson_cube/plot_tre_vs_vertices.py
 *.msh
 *.vtk
+tokamak/results/
