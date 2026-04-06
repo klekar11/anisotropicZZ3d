@@ -252,6 +252,7 @@ def adapt_mesh_mmg(
         "-hgrad", str(hgrad),
         "-hmin", str(hmin),
         "-hmax", str(hmax),
+        "-nosurf"
     ]
     print(f"  Command: {' '.join(cmd)}")
 
@@ -326,9 +327,15 @@ def save_computed_quantities(
 
     print(f"  Saved computed quantities → {filename}")
 
-def to_vtu(mesh_path, output_dir=None):
-    """Convert a Medit .mesh file to VTU.  If *output_dir* is given the VTU is
-    placed there instead of next to the source mesh."""
+def to_vtu(mesh_path, output_dir=None, write_solution=False, u_h=None, dof_to_medit=None):
+    """Convert a Medit .mesh file to VTU.
+
+    If ``output_dir`` is given, the VTU is placed there instead of next to the
+    source mesh.
+
+    When ``write_solution`` is True, ``u_h`` is also stored in VTU point data
+    under the name ``u_h``.
+    """
     try:
         import meshio
     except ImportError:
@@ -340,17 +347,50 @@ def to_vtu(mesh_path, output_dir=None):
         vtu_path = str(Path(output_dir) / Path(mesh_path).with_suffix(".vtu").name)
     else:
         vtu_path = mesh_path.replace(".mesh", ".vtu")
+
     mesh = meshio.read(mesh_path)
 
     # Keep only tetrahedral cells (discard any lower-dim leftovers)
     tet_cells = [c for c in mesh.cells if c.type == "tetra"]
     if not tet_cells:
-        tet_cells = mesh.cells   # fallback: keep whatever is there
+        tet_cells = mesh.cells
 
-    meshio.write(
-        vtu_path,
-        meshio.Mesh(points=mesh.points, cells=tet_cells),
-    )
+    point_data = {}
+    if write_solution:
+        if u_h is None:
+            raise ValueError("write_solution=True requires u_h to be provided")
+
+        if hasattr(u_h, "x") and hasattr(u_h.x, "array"):
+            values = np.asarray(u_h.x.array, dtype=np.float64).reshape(-1)
+        else:
+            values = np.asarray(u_h, dtype=np.float64).reshape(-1)
+
+        n_points = mesh.points.shape[0]
+        if values.size == n_points:
+            point_values = values
+        elif values.size % n_points == 0:
+            n_comp = values.size // n_points
+            point_values = values.reshape(n_points, n_comp)
+        else:
+            raise ValueError(
+                "u_h size is incompatible with mesh points: "
+                f"got {values.size} values for {n_points} points"
+            )
+
+        if dof_to_medit is not None:
+            perm = np.asarray(dof_to_medit, dtype=np.int64)
+            if perm.size != n_points:
+                raise ValueError(
+                    "dof_to_medit size mismatch: "
+                    f"got {perm.size}, expected {n_points}"
+                )
+            reordered = np.empty_like(point_values)
+            reordered[perm] = point_values
+            point_values = reordered
+
+        point_data["u_h"] = point_values
+
+    meshio.write(vtu_path, meshio.Mesh(points=mesh.points, cells=tet_cells, point_data=point_data))
     print(f"[VTK]  {mesh_path}  to  {vtu_path}")
     return vtu_path
 
