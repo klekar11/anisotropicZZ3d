@@ -218,15 +218,22 @@ def build_metric(
     sol_path: Path | str,
 ) -> Path:
 
-    n_verts = h_p.shape[0]
-    M_all = np.zeros((n_verts, 3, 3))
-    for P in range(n_verts):
+    # n_dolfinx: vertices DOLFINx knows about (h_p / Q are indexed by this)
+    # n_medit:   vertices stored in the MEDIT file (M_reordered must match this)
+    # MMG3D can produce required/corner vertices that sit in the Vertices section
+    # but are unreferenced by any tetrahedron; DOLFINx drops those but
+    # input_global_indices still indexes into the full original vertex list.
+    n_dolfinx = h_p.shape[0]
+    n_medit = _read_vertex_count(mesh_path)
+
+    M_all = np.zeros((n_dolfinx, 3, 3))
+    for P in range(n_dolfinx):
         D = np.diag(1.0 / h_p[P] ** 2)
         Q_P = Q[P]
         M_all[P] = Q_P.T @ D @ Q_P
 
-    M_reordered = np.zeros_like(M_all)
-    for i in range(n_verts):
+    M_reordered = np.zeros((n_medit, 3, 3))
+    for i in range(n_dolfinx):
         M_reordered[perm[i]] = M_all[i]
 
     return write_metric_sol(mesh_path, M_reordered, sol_path)
