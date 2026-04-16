@@ -9,8 +9,10 @@ tests/results
 __pycache__
 poisson_cube/results*
 poisson_cube/mesh_reorder.py
-
+poisson_cube/nz_resul*
 poisson_cube/plot_tre_vs_vertices.py
 *.msh
 *.vtk
-tokamak/results/
+tokamak/
+time/
+

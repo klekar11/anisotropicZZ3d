@@ -18,7 +18,7 @@ from solver import solve_sphere_poisson, u_exact_sphere_np  # noqa: E402
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
-N_LOOP = 10
+N_LOOP = 40
 HMAX = 1.0
 HMIN = 1e-10
 HGRAD = -1
@@ -28,10 +28,10 @@ MMG3D_EXE = "/usr/local/bin/mmg3d_O3"
 
 # Sphere profile parameters
 R = 0.5
-EPSILON = 0.02
+EPSILON = 0.1
 
 # Tolerance sequence: start at 1 and halve four times
-TOL_VALUES = [1.0, 0.5, 0.25, 0.125]
+TOL_VALUES = [10 / (2**i) for i in range(5)]
 
 results_dir = Path(__file__).resolve().parent / "results_sphere"
 results_dir.mkdir(exist_ok=True, parents=True)
@@ -96,10 +96,13 @@ for tol in TOL_VALUES:
 csv_path = results_dir / "convergence.csv"
 with open(csv_path, "w", newline="") as fh:
 	writer = csv.writer(fh)
-	writer.writerow(["tol", "loop_idx", "n_vertices", "TRE"])
+	writer.writerow(["tol", "loop_idx", "n_vertices", "TRE", "max_aspect_ratio", "avg_aspect_ratio"])
 	for tol in TOL_VALUES:
 		for entry in all_iter_metrics[tol]:
-			writer.writerow([tol, entry["loop_idx"], entry["n_vertices"], entry["TRE"]])
+			writer.writerow([
+				tol, entry["loop_idx"], entry["n_vertices"], entry["TRE"],
+				entry["max_aspect_ratio"], entry["avg_aspect_ratio"],
+			])
 print(f"\nConvergence CSV saved -> {csv_path}")
 
 # ---------------------------------------------------------------------------
