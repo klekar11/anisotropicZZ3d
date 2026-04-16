@@ -159,6 +159,42 @@ def compute_G_tilde(
 
     return G, eta_zz_fn
 
+
+def compute_G_tilde_nz(
+    u_h: fem.Function,
+) -> tuple[dict[tuple[int, int], np.ndarray], fem.Function]:
+    """Like compute_G_tilde but uses the Naga-Zhang recovered gradient (P2).
+
+    Replaces the ZZ recovery Pi_h with Gh(u_h) from nz_eta_estimatorP2.
+    The rest of the metric pipeline (compute_G_P, adapt_h, …) is unchanged.
+    """
+    from nz_eta_estimatorP2 import Gh  # local import: requires numba
+
+    domain = u_h.function_space.mesh
+    gdim = domain.geometry.dim
+
+    G_nz = Gh(u_h)  # fem.Function in P2 vector space
+    etas = [ufl.grad(u_h)[i] - G_nz[i] for i in range(gdim)]
+
+    V0 = fem.functionspace(domain, ("DG", 0))
+    v0 = ufl.TestFunction(V0)
+    n_cells = V0.dofmap.index_map.size_local
+
+    G = {}
+    for i in range(gdim):
+        for j in range(i, gdim):
+            b = fem.assemble_vector(form(etas[i] * etas[j] * v0 * ufl.dx))
+            G[(i, j)] = b.array[:n_cells].copy()
+
+    dg0_vec_el = basix.ufl.element("DG", domain.topology.cell_name(), 0, shape=(gdim,))
+    V_dg0_vec = fem.functionspace(domain, dg0_vec_el)
+    eta_nz_fn = fem.Function(V_dg0_vec, name="eta_nz")
+    eta_nz_expr = ufl.as_vector([etas[i] for i in range(gdim)])
+    eta_nz_fn.interpolate(fem.Expression(eta_nz_expr, V_dg0_vec.element.interpolation_points))
+
+    return G, eta_nz_fn
+
+
 def get_G_matrix(G: dict[tuple[int,int], np.ndarray], K: int, gdim: int) -> np.ndarray:
 
     mat = np.zeros((gdim, gdim))

@@ -22,6 +22,7 @@ from eta_estimator1 import (
     adapt_h,
     compute_anisotropic_eta,
     compute_G_tilde,
+    compute_G_tilde_nz,
     compute_G_P,
     compute_lambda_P,
     compute_sigma_P,
@@ -44,6 +45,7 @@ def run_adaptive_poisson(
     degree_raise: int = 3,
     mmg3d_exe: str = "/usr/local/bin/mmg3d_O3",
     initial_mesh_file: Path | str | None = None,
+    k: int = 1,
 ) -> tuple:
     """Run the anisotropic adaptive Poisson algorithm (Table 1.6).
 
@@ -89,6 +91,9 @@ def run_adaptive_poisson(
         Final target mesh-size array, shape ``(n_vertices, tdim)``.
     final_metrics :
         Dictionary with final-iteration metrics and estimators.
+    k :
+        Polynomial degree and estimator selector.  ``k=1`` uses the ZZ
+        recovered gradient; ``k=2`` uses the Naga-Zhang (PPR) estimator.
     iteration_metrics :
         List of per-iteration dicts with keys ``loop_idx``, ``n_vertices``,
         and ``TRE``.
@@ -174,9 +179,6 @@ def run_adaptive_poisson(
             u_h, u_numpy, degree_raise
         )
         tre_iter = float(norm_grad_e / norm_grad_u)
-        iteration_metrics.append(
-            {"loop_idx": loop_idx, "n_vertices": n_vertices_iter, "TRE": tre_iter}
-        )
         np.save(str(compute_errs_dir / f"uh_loop_{loop_idx:02d}.npy"), u_h.x.array)
         print(
             f"  TRE={tre_iter:.6e}  n_vertices={n_vertices_iter}"
@@ -186,13 +188,31 @@ def run_adaptive_poisson(
         # ---- Step 3: Cell-wise quantities -------------------------
         print("\n[3] Computing cell-wise quantities...")
         svd = compute_jacobian_svd(msh)
+
+        # Aspect ratios (sigma_max / sigma_min) already in svd["AR"]
+        ar = svd["AR"]
+        max_ar_iter = float(np.max(ar))
+        avg_ar_iter = float(np.mean(ar))
+        iteration_metrics.append(
+            {
+                "loop_idx": loop_idx,
+                "n_vertices": n_vertices_iter,
+                "TRE": tre_iter,
+                "max_aspect_ratio": max_ar_iter,
+                "avg_aspect_ratio": avg_ar_iter,
+            }
+        )
+        print(f"  AR  max={max_ar_iter:.4e}  avg={avg_ar_iter:.4e}")
         eta_k, res1, omegas = compute_anisotropic_eta(u_h, f_rhs)
         eta_k_i = np.asarray(res1)[None, :] * np.asarray(omegas)
         print(f"  eta_k_i shape: {eta_k_i.shape}  (directions × cells)")
 
-        # compute_G_tilde now also returns the ZZ error as a fem.Function
-        G, eta_zz_fn = compute_G_tilde(u_h)
-        print("  G_tilde + eta_zz computed")
+        if k == 1:
+            G, eta_zz_fn = compute_G_tilde(u_h)
+            print("  G_tilde (ZZ) computed")
+        else:
+            G, eta_zz_fn = compute_G_tilde_nz(u_h)
+            print("  G_tilde (NZ/PPR) computed")
 
         # ---- Step 4: Vertex-wise quantities -----------------------
         print("\n[4] Computing vertex-wise quantities...")
@@ -216,11 +236,17 @@ def run_adaptive_poisson(
 
         # Attach u_h to VTU explicitly on the final loop.
         export_solution = (loop_idx == n_loop - 1)
+        if export_solution and k > 1:
+            from dolfinx import fem as _fem
+            u_h_vtu = _fem.Function(_fem.functionspace(msh, ("CG", 1)))
+            u_h_vtu.interpolate(u_h)
+        else:
+            u_h_vtu = u_h
         vtu_path = to_vtu(
             mesh_path,
             output_dir=vtk_dir,
             write_solution=export_solution,
-            u_h=u_h,
+            u_h=u_h_vtu,
             dof_to_medit=perm,
         )
         if vtu_path and export_solution:
