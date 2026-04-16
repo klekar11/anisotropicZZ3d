@@ -2,10 +2,12 @@ import numpy as np
 import ufl
 from ufl import SpatialCoordinate, TestFunction, TrialFunction, grad, inner, dx, div
 from mpi4py import MPI
+import dolfinx
 from dolfinx import fem
 from dolfinx.fem import functionspace, Function, dirichletbc, locate_dofs_topological, Constant
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx.mesh import exterior_facet_indices
+from typing import Callable
 
 EPSILON = 0.01
 SPHERE_R = 0.5
@@ -239,8 +241,58 @@ def solve_poisson_torus(msh, R0, Z0, r0, degree=1, epsilon=20.0):
     return u_h, f_func
 
 
+def solve_poisson_generic(
+    msh,
+    f,
+    g: Callable[[np.ndarray], np.ndarray],
+    k: int = 1,
+) -> tuple:
+    """Solve -Δu = f, u|∂Ω = g using Pk finite elements.
 
+    Parameters
+    ----------
+    msh : dolfinx.mesh.Mesh
+    f   : UFL expression or numpy callable for the RHS.
+          If a numpy callable, it is interpolated into a CG-k Function.
+    g   : numpy callable for the Dirichlet BC.
+    k   : polynomial degree (1 or 2).
 
+    Returns
+    -------
+    (u_h, f_coeff) where f_coeff is UFL-compatible (used by eta estimator).
+    """
+    V = fem.functionspace(msh, ("CG", k))
+
+    uD = fem.Function(V)
+    uD.interpolate(g)
+
+    tdim = msh.topology.dim
+    fdim = tdim - 1
+    msh.topology.create_connectivity(fdim, tdim)
+    boundary_facets = dolfinx.mesh.exterior_facet_indices(msh.topology)
+    boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+    bc = fem.dirichletbc(uD, boundary_dofs)
+
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+
+    if isinstance(f, ufl.core.expr.Expr):
+        f_coeff = f
+    else:
+        F = fem.Function(V)
+        F.interpolate(f)
+        f_coeff = F
+
+    a = ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    L = f_coeff * v * ufl.dx
+
+    problem = LinearProblem(
+        a, L, bcs=[bc],
+        petsc_options={"ksp_type": "cg", "pc_type": "hypre", "pc_hypre_type": "boomeramg"},
+        petsc_options_prefix="poisson_generic_",
+    )
+    u_h = problem.solve()
+    return u_h, f_coeff
 
 
 
