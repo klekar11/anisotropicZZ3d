@@ -42,7 +42,7 @@ def run_adaptive_poisson(
     tol: float = 0.5,
     alpha: float = 0.25,
     correction_factor: float = 1.5,
-    degree_raise: int = 3,
+    degree_raise: int = 4,
     mmg3d_exe: str = "/usr/local/bin/mmg3d_O3",
     initial_mesh_file: Path | str | None = None,
     k: int = 1,
@@ -167,11 +167,8 @@ def run_adaptive_poisson(
         u_h, f_rhs = solver(msh)
         tdim = msh.topology.dim
         n_vertices_iter = int(msh.topology.index_map(0).size_global)
-        print(
-            f"  Solution on "
-            f"{msh.topology.index_map(tdim).size_global} cells, "
-            f"{n_vertices_iter} vertices"
-        )
+        n_cells_iter    = int(msh.topology.index_map(tdim).size_global)
+        print(f"  Solution on {n_cells_iter} cells, {n_vertices_iter} vertices")
 
         # ---- Per-iteration TRE & u_h numpy checkpoint -------------
         print("\n[2b] Computing TRE and saving u_h checkpoint...")
@@ -193,15 +190,15 @@ def run_adaptive_poisson(
         ar = svd["AR"]
         max_ar_iter = float(np.max(ar))
         avg_ar_iter = float(np.mean(ar))
-        iteration_metrics.append(
-            {
-                "loop_idx": loop_idx,
-                "n_vertices": n_vertices_iter,
-                "TRE": tre_iter,
-                "max_aspect_ratio": max_ar_iter,
-                "avg_aspect_ratio": avg_ar_iter,
-            }
-        )
+        iter_entry = {
+            "loop_idx": loop_idx,
+            "n_vertices": n_vertices_iter,
+            "n_cells": n_cells_iter,
+            "TRE": tre_iter,
+            "max_aspect_ratio": max_ar_iter,
+            "avg_aspect_ratio": avg_ar_iter,
+        }
+        iteration_metrics.append(iter_entry)
         print(f"  AR  max={max_ar_iter:.4e}  avg={avg_ar_iter:.4e}")
         eta_k, res1, omegas = compute_anisotropic_eta(u_h, f_rhs)
         eta_k_i = np.asarray(res1)[None, :] * np.asarray(omegas)
@@ -223,8 +220,26 @@ def run_adaptive_poisson(
 
         # ---- Step 5: Equidistribution check & h update ------------
         print("\n[5] Checking equidistribution...")
-        h_p = adapt_h(msh, eta_k_i, u_h, tol, lambda_p, alpha, correction_factor, sigma_p)
+        h_p, coarsen_any, refine_any = adapt_h(msh, eta_k_i, u_h, tol, lambda_p, alpha, correction_factor, sigma_p)
         h_p = np.clip(h_p, hmin, hmax)
+        n_coarsen = int(np.sum(coarsen_any))
+        n_refine  = int(np.sum(refine_any))
+
+        # Cell-level: a cell is flagged if ANY of its 4 vertices is flagged
+        ctv = msh.topology.connectivity(tdim, 0).array.reshape(-1, tdim + 1)
+        n_cells_coarsen = int(np.sum(np.any(coarsen_any[ctv], axis=1)))
+        n_cells_refine  = int(np.sum(np.any(refine_any[ctv], axis=1)))
+
+        iter_entry["n_coarsen"]       = n_coarsen
+        iter_entry["n_refine"]        = n_refine
+        iter_entry["n_cells_coarsen"] = n_cells_coarsen
+        iter_entry["n_cells_refine"]  = n_cells_refine
+        print(
+            f"  Vertices:  coarsen ≥1 dir: {n_coarsen}/{n_vertices_iter},  "
+            f"refine ≥1 dir: {n_refine}/{n_vertices_iter}\n"
+            f"  Cells:     coarsen ≥1 vtx: {n_cells_coarsen}/{n_cells_iter},  "
+            f"refine ≥1 vtx: {n_cells_refine}/{n_cells_iter}"
+        )
 
         # ---- Step 6: Build metric tensor --------------------------
         print("\n[6] Building metric tensor...")
@@ -233,6 +248,25 @@ def run_adaptive_poisson(
         perm = build_dolfinx_to_medit_map(msh)
         build_metric(h_p, Q, perm, mesh_path, sol_path)
         print(f"  Metric → {Path(sol_path).name}")
+
+        # ---- Diagnostic: metric anisotropy near the feature -------
+        verts = msh.geometry.x
+        dists = np.linalg.norm(verts, axis=1)          # distance from origin
+        shell_radius = 0.5                              # adjust if not sphere
+        P_shell = int(np.argmin(np.abs(dists - shell_radius)))
+        r_hat = verts[P_shell] / (dists[P_shell] + 1e-14)
+        M_P = Q[P_shell].T @ np.diag(1.0 / h_p[P_shell] ** 2) @ Q[P_shell]
+        evals, evecs = np.linalg.eigh(M_P)
+        alignment = float(np.abs(evecs[:, -1] @ r_hat))
+        print(
+            f"  [DIAG] Metric eigenvalues near shell: "
+            f"{evals[0]:.3e}  {evals[1]:.3e}  {evals[2]:.3e}"
+        )
+        print(
+            f"  [DIAG] Largest eigenvec: {evecs[:,-1].round(3)}"
+            f"  radial dir: {r_hat.round(3)}"
+            f"  |alignment|={alignment:.3f}  (1.0 = correct)"
+        )
 
         # Attach u_h to VTU explicitly on the final loop.
         export_solution = (loop_idx == n_loop - 1)
@@ -284,7 +318,7 @@ def run_adaptive_poisson(
             eta_aniso = float(np.sqrt(np.sum(np.asarray(eta_k))))
             gdim = msh.geometry.dim
             eta_zz_val = float(
-                np.sqrt(max(sum(np.sum(G[(i, i)]) for i in range(gdim)), 0.0))
+                np.sqrt(sum(np.sum(G[(i, i)]) for i in range(gdim)))
             )
 
             final_metrics = {
