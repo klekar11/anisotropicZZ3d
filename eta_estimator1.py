@@ -1,5 +1,6 @@
 # pyright: reportMissingImports=false, reportMissingModuleSource=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportAssignmentType=false, reportCallIssue=false, reportGeneralTypeIssues=false, reportIndexIssue=false, reportOperatorIssue=false, reportReturnType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownLambdaType=false
 import numpy as np
+
 import dolfinx
 from dolfinx import fem, mesh, default_scalar_type
 from dolfinx.fem import form
@@ -148,7 +149,7 @@ def compute_G_tilde(
     for i in range(gdim):
         for j in range(i, gdim):
             b = fem.assemble_vector(form(etas[i] * etas[j] * v0 * ufl.dx))
-            G[(i, j)] = b.array[:n_cells].copy()
+            G[(i, j)] = b.array[:].copy()
 
     # Build a storable DG0 vector Function for eta_zz
     dg0_vec_el = basix.ufl.element("DG", domain.topology.cell_name(), 0, shape=(gdim,))
@@ -318,8 +319,12 @@ def adapt_h(
     ALPHA: float,
     correction_factor: float,
     sigma_p: np.ndarray,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (h_p, coarsen_any, refine_any).
 
+    coarsen_any[P] is True if at least one direction of vertex P is to be coarsened.
+    refine_any[P]  is True if at least one direction of vertex P is to be refined.
+    """
     tdim = msh.topology.dim
     gdim = msh.geometry.dim
     n_verts = msh.topology.index_map(0).size_local
@@ -337,7 +342,10 @@ def adapt_h(
         for i in range(gdim):
             eta_i_at_P[i, P] = np.sum(eta_k_i[i, cells_of_P])
 
-    h_p = lambda_p.copy()
+    h_p = np.sqrt(2) * lambda_p.copy()
+    
+    coarsen_any = np.zeros(n_verts, dtype=bool)
+    refine_any  = np.zeros(n_verts, dtype=bool)
 
     for i_dir in range(gdim):
         coeff = (4.0 * sigma_p) / (3.0 * n_verts)
@@ -350,9 +358,11 @@ def adapt_h(
 
         coarsen = lower > eta_sum
         h_p[coarsen, i_dir] = correction_factor * lambda_p[coarsen, i_dir]
+        coarsen_any |= coarsen
 
         refine = eta_sum > upper
         h_p[refine, i_dir] = lambda_p[refine, i_dir] / correction_factor
+        refine_any |= refine
 
         print(
             f"  Dir {i_dir + 1}:  satisfied {n_ok}/{n_verts} "
@@ -360,7 +370,7 @@ def adapt_h(
             f"coarsen {int(np.sum(coarsen))},  refine {int(np.sum(refine))}"
         )
 
-    return h_p
+    return h_p, coarsen_any, refine_any
 
 
 def compute_jacobian_svd(msh: mesh.Mesh) -> dict:

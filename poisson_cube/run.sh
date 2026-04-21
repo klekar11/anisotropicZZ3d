@@ -4,13 +4,14 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-PROBLEM="1d"          # "1d" or "sphere"
+PROBLEM="1d"          # "1d", "sphere", or "plan"
 K=2                   # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
 RESULTS="nz_results_1d" # output directory name (created inside poisson_cube/)
 
-N_LOOP=40             # adaptive iterations per tolerance
-TOL_START=1.0         # first tolerance value
-N_TOL=5               # number of tolerance halvings (sequence: TOL_START / 2^i)
+
+N_LOOP=30             # adaptive iterations per tolerance
+TOL_START=1        # first tolerance value
+N_TOL=4               # number of tolerance halvings (sequence: TOL_START / 2^i)
 
 HMAX=1.0
 HMIN=1e-10

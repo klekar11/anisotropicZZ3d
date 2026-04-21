@@ -230,7 +230,7 @@ def build_metric(
     for P in range(n_dolfinx):
         D = np.diag(1.0 / h_p[P] ** 2)
         Q_P = Q[P]
-        M_all[P] = Q_P.T @ D @ Q_P
+        M_all[P] = Q_P @ D @ Q_P.T
 
     M_reordered = np.zeros((n_medit, 3, 3))
     for i in range(n_dolfinx):
