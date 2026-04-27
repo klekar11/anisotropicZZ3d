@@ -9,8 +9,10 @@ EPSILON_PLAN   = 0.01
 
 # TCV tokamak torus parameters (distances in mm)
 R0_TOK      = 640.0   # major radius of the torus axis
-Z0_TOK      = 400.0   # vertical center of the cross-section
-r0_TOK      = 100.0   # radius of the spherical shell inside the torus
+Z0_TOK      = 400.0   # vertical centre of the cross-section
+Rc_TOK      = 580  # poloidal R-coordinate of the shell centre (= R0_TOK → centred on axis)
+Zc_TOK      = 400.0   # poloidal Z-coordinate of the shell centre (= Z0_TOK → centred on axis)
+r_shell_TOK = 60.0    # radius of the spherical shell
 EPSILON_TOK = 10.0    # transition-layer half-width
 
 
@@ -75,57 +77,51 @@ def _problem_sphere(R: float = R_SPHERE, epsilon: float = EPSILON_SPHERE):
 def _problem_tok_sphere(
     R0: float = R0_TOK,
     Z0: float = Z0_TOK,
-    r0: float = r0_TOK,
+    Rc: float = Rc_TOK,
+    Zc: float = Zc_TOK,
+    r_shell: float = r_shell_TOK,
     epsilon: float = EPSILON_TOK,
 ):
-    """Smoothed-Heaviside toroidal shell inside a tokamak domain.
- 
-    Exact solution:  u = H_epsilon(s),  s = r0 - d
-    where d = sqrt((sqrt(x²+y²) - R0)² + (z - Z0)²) is the poloidal
-    distance from the torus axis, and H_epsilon is the cosine-smoothed
-    Heaviside (eq. 1.25):
- 
+    """Smoothed-Heaviside spherical shell inside a tokamak domain.
+
+    The shell is a sphere of radius ``r_shell`` centred at the poloidal
+    point ``(Rc, Zc)`` (in mm, cylindrical coordinates).  Setting
+    ``Rc = R0, Zc = Z0`` centres the shell on the magnetic axis.
+
+    Exact solution:  u = H_epsilon(s),  s = r_shell - d
+    where d = sqrt((sqrt(x²+y²) - Rc)² + (z - Zc)²) is the poloidal
+    distance from the shell centre, and H_epsilon is the cosine-smoothed
+    Heaviside:
+
         H_ε(s) = 0                                          s ≤ -ε
                = (s+ε)/(2ε) + sin(πs/ε)/(2π)              |s| ≤ ε
                = 1                                          s ≥  ε
- 
-    The solution is EXACTLY 0/1 outside the transition layer |s| > ε,
-    consistent with _problem_sphere.
- 
-    RHS  f = -Δu  is derived analytically via the chain rule:
+
+    RHS  f = -Δu  via the chain rule:
         Δu = H_ε''(s)|∇s|² + H_ε'(s) Δs,   |∇s|=1,  Δs = -Δd
-        H_ε'(s)  =  1/(2ε) (1 + cos(πs/ε))
-        H_ε''(s) = -π/(2ε²) sin(πs/ε)
-        Δd       =  1/d + (R_xy - R0) / (R_xy · d)   [cylindrical Laplacian of d]
- 
-    f = 0 outside the layer, so the UFL conditional keeps the
-    expression tree small and avoids FFCX quadrature explosion.
+        Δd = 1/d + (R_xy - Rc) / (R_xy · d)   [cylindrical Laplacian of d]
     """
     def f_factory(msh):
         x   = ufl.SpatialCoordinate(msh)
-        # Cylindrical radius; tokamak domain never contains R_xy = 0
         Rxy = ufl.sqrt(x[0]**2 + x[1]**2 + 1e-16)
-        # Poloidal distance from the torus axis; regularised at d = 0
-        d   = ufl.sqrt((Rxy - R0)**2 + (x[2] - Z0)**2 + 1e-16)
-        s   = r0 - d   # signed distance: > 0 inside torus shell, < 0 outside
- 
+        d   = ufl.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2 + 1e-16)
+        s   = r_shell - d
+
         in_layer = ufl.And(ufl.ge(s, -epsilon), ufl.le(s, epsilon))
- 
-        # Cylindrical Laplacian of d (derived in docstring above)
-        lap_d = 1.0 / d + (Rxy - R0) / (Rxy * d)
- 
-        # f = -H_ε''(s) + H_ε'(s) · Δd   (only non-zero inside the layer)
+
+        lap_d = 1.0 / d + (Rxy - Rc) / (Rxy * d)
+
         return ufl.conditional(
             in_layer,
             ufl.pi / (2.0 * epsilon**2) * ufl.sin(ufl.pi * s / epsilon)
             + (1.0 / (2.0 * epsilon)) * (1.0 + ufl.cos(ufl.pi * s / epsilon)) * lap_d,
             ufl.as_ufl(0.0),
         )
- 
+
     def g(x: np.ndarray) -> np.ndarray:
         Rxy = np.sqrt(x[0]**2 + x[1]**2)
-        d   = np.sqrt((Rxy - R0)**2 + (x[2] - Z0)**2)
-        s   = r0 - d
+        d   = np.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2)
+        s   = r_shell - d
         return np.where(
             s >=  epsilon, 1.0,
             np.where(
@@ -134,7 +130,7 @@ def _problem_tok_sphere(
                 + np.sin(np.pi * s / epsilon) / (2.0 * np.pi),
             ),
         )
- 
+
     return f_factory, g, g
 
 

@@ -171,17 +171,16 @@ def run_adaptive_poisson(
         n_cells_iter    = int(msh.topology.index_map(tdim).size_global)
         print(f"  Solution on {n_cells_iter} cells, {n_vertices_iter} vertices")
 
-        # ---- Per-iteration TRE & u_h numpy checkpoint -------------
-        print("\n[2b] Computing TRE and saving u_h checkpoint...")
+        # ---- Per-iteration TRE ----------------------------------------
+        print("\n[2b] Computing TRE...")
         norm_grad_e, norm_grad_u, norm_grad_uh = compute_error_norms(
             u_h, u_numpy, degree_raise
         )
-        tre_iter = float(norm_grad_e / norm_grad_u)
-        np.save(str(compute_errs_dir / f"uh_loop_{loop_idx:02d}.npy"), u_h.x.array)
-        print(
-            f"  TRE={tre_iter:.6e}  n_vertices={n_vertices_iter}"
-            f"  → uh_loop_{loop_idx:02d}.npy"
-        )
+        tre_iter = float(norm_grad_e / norm_grad_u) if norm_grad_u > 1e-30 else float('nan')
+        print(f"  TRE={tre_iter:.6e}  n_vertices={n_vertices_iter}")
+        if not np.isfinite(tre_iter):
+            print("  WARNING: TRE is NaN/inf — solution is degenerate, stopping loop.")
+            break
 
         # ---- Step 3: Cell-wise quantities -------------------------
         print("\n[3] Computing cell-wise quantities...")
@@ -223,6 +222,11 @@ def run_adaptive_poisson(
         print("\n[5] Checking equidistribution...")
         h_p, coarsen_any, refine_any = adapt_h(msh, eta_k_i, u_h, tol, lambda_p, alpha, correction_factor, sigma_p)
         h_p = np.clip(h_p, hmin, hmax)
+        # Cap per-vertex anisotropy to prevent metric eigenvalue explosion.
+        # Without this, h_p → hmin in one direction gives λ = 1/hmin² → MMG3D failure.
+        MAX_H_RATIO = 1e3  # limits λ_max/λ_min ≤ 1e6 in the metric
+        h_min_per_vtx = np.max(h_p, axis=1, keepdims=True) / MAX_H_RATIO
+        h_p = np.maximum(h_p, h_min_per_vtx)
         n_coarsen = int(np.sum(coarsen_any))
         n_refine  = int(np.sum(refine_any))
 
@@ -269,9 +273,9 @@ def run_adaptive_poisson(
             f"  [DIAG] Anisotropy direction (largest eigenvec): {evecs[:, -1].round(3)}"
         )
 
-        # Attach u_h to VTU explicitly on the final loop.
-        export_solution = (loop_idx == n_loop - 1)
-        if export_solution and k > 1:
+        # Attach u_h to every VTU. For k=2 (P2 elements) interpolate down to
+        # CG1 so ParaView can read it as point data.
+        if k > 1:
             from dolfinx import fem as _fem
             u_h_vtu = _fem.Function(_fem.functionspace(msh, ("CG", 1)))
             u_h_vtu.interpolate(u_h)
@@ -280,14 +284,12 @@ def run_adaptive_poisson(
         vtu_path = to_vtu(
             mesh_path,
             output_dir=vtk_dir,
-            write_solution=export_solution,
+            write_solution=True,
             u_h=u_h_vtu,
             dof_to_medit=perm,
         )
-        if vtu_path and export_solution:
+        if vtu_path:
             print(f"  VTU (+u_h) saved: {Path(vtu_path).name}")
-        elif vtu_path:
-            print(f"  VTU (mesh only) saved: {Path(vtu_path).name}")
 
         # ---- Step 7: MMG adaptation (skip on last iteration) ------
         if loop_idx < n_loop - 1:
@@ -334,8 +336,6 @@ def run_adaptive_poisson(
                 "eta_ZZ": eta_zz_val,
             }
 
-            metrics_path = compute_errs_dir / "final_error_metrics.npz"
-            np.savez(metrics_path, **final_metrics)
             print("  Final metrics:")
             print(
                 f"    n_vertices={n_vertices_iter}  TRE={tre_iter:.6e}"
@@ -347,7 +347,6 @@ def run_adaptive_poisson(
                 f"  EI_ZZ={final_metrics['EI_ZZ']:.6e}"
                 f"  eta_aniso={eta_aniso:.6e}  eta_ZZ={eta_zz_val:.6e}"
             )
-            print(f"  Saved metrics → {metrics_path}")
 
         print(f"\n[END] Iteration {loop_idx + 1} complete")
 

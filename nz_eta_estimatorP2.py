@@ -247,35 +247,102 @@ def Gh(uh):
     return Ghuh
 
 
-# --- The parallel core ------------------------------------------------------
-@njit(parallel=True, cache=True)
+# --- Original parallel core (BUGGY — race condition on mid-edge DOFs) -------
+# Numba does not support reductions on 2-D arrays inside prange, so
+# "Ghuh += Ghuh_temp" is an unprotected read-modify-write on the shared
+# Ghuh array. Each mid-edge DOF l should receive 0.5 * grad_i(l) from
+# vertex i AND 0.5 * grad_j(l) from vertex j, but the race means only one
+# contribution lands, making G_nz ≈ 0.5 * grad(u) at edge-midpoint DOFs
+# instead of ≈ grad(u). This inflates ||grad(u_h) - G_nz|| by ~5x.
+#
+# @njit(parallel=True, cache=True)
+# def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
+#     Nnodes = nodes.shape[0]
+#     Ndofs = dofs.shape[0]
+#     Ghuh = np.zeros((Ndofs, 3))
+#     for i in prange(Nnodes):
+#         on_boundary = B[i]
+#         node_i = nodes[i]
+#         j = np.array([i])
+#         j = process_boundary_3d(elems, nodes_to_elem_array, j, B, on_boundary,
+#                                 dofs, dofmap_list, node_i)
+#         L = _patch(nodes_to_elem_array, dofmap_list, j)
+#         if L.shape[0] < N_MIN_PATCH:
+#             j_new = j.copy()
+#             for k in j:
+#                 j_new = np.union1d(j_new, vertex_neighbors(elems, nodes_to_elem_array, k))
+#             j = j_new
+#             L = _patch(nodes_to_elem_array, dofmap_list, j)
+#         hx = 0.0; hy = 0.0; hz = 0.0
+#         for m in range(L.shape[0]):
+#             dx = abs(dofs[L[m], 0] - node_i[0])
+#             dy = abs(dofs[L[m], 1] - node_i[1])
+#             dz = abs(dofs[L[m], 2] - node_i[2])
+#             if dx > hx: hx = dx
+#             if dy > hy: hy = dy
+#             if dz > hz: hz = dz
+#         if hx < H_DIR_TOL: hx = 1.0
+#         if hy < H_DIR_TOL: hy = 1.0
+#         if hz < H_DIR_TOL: hz = 1.0
+#         p = np.empty((L.shape[0], 3))
+#         for m in range(L.shape[0]):
+#             p[m, 0] = (dofs[L[m], 0] - node_i[0]) / hx
+#             p[m, 1] = (dofs[L[m], 1] - node_i[1]) / hy
+#             p[m, 2] = (dofs[L[m], 2] - node_i[2]) / hz
+#         A = _build_vandermonde(p)
+#         b = np.empty(L.shape[0])
+#         for m in range(L.shape[0]):
+#             b[m] = uh[L[m]]
+#         AtA = A.T @ A; Atb = A.T @ b
+#         a = np.linalg.solve(AtA, Atb)
+#         k_vertex = v2d[i]
+#         Ghuh[k_vertex, 0] = a[1] / hx
+#         Ghuh[k_vertex, 1] = a[2] / hy
+#         Ghuh[k_vertex, 2] = a[3] / hz
+#         L_edge = find_closest_dofs(nodes, elems, nodes_to_elem_array, dofs, i)
+#         Ghuh_temp = np.zeros((Ndofs, 3))      # ← O(N) alloc per vertex = O(N²) total
+#         for idx in range(L_edge.shape[0]):
+#             l = L_edge[idx]
+#             x = (dofs[l, 0] - node_i[0]) / hx
+#             y = (dofs[l, 1] - node_i[1]) / hy
+#             z = (dofs[l, 2] - node_i[2]) / hz
+#             gx, gy, gz = _eval_grad(a, x, y, z)
+#             Ghuh_temp[l, 0] += 0.5 * gx / hx
+#             Ghuh_temp[l, 1] += 0.5 * gy / hy
+#             Ghuh_temp[l, 2] += 0.5 * gz / hz
+#         Ghuh += Ghuh_temp                     # ← RACE CONDITION (2-D reduction)
+#     return Ghuh
+
+
+# --- Fixed serial core ------------------------------------------------------
+@njit(cache=True)
 def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
     '''
-    Parallel evaluation of the recovered gradient at every P2 DOF.
-    
+    Serial evaluation of the recovered gradient at every P2 DOF.
+
     Key differences from 2D:
       - per-direction rescaling h_x, h_y, h_z
       - 20-column Vandermonde
       - gradient evaluated and divided component-wise
+
+    Must be serial: mid-edge DOF l on edge (i,j) accumulates 0.5*grad_i(l)
+    from vertex i and 0.5*grad_j(l) from vertex j.  Direct += into the
+    shared Ghuh is safe in a sequential loop; prange without atomic ops
+    causes a race that makes G_nz wrong at those DOFs.
     '''
     Nnodes = nodes.shape[0]
     Ndofs = dofs.shape[0]
     Ghuh = np.zeros((Ndofs, 3))
-    
-    for i in prange(Nnodes):
+
+    for i in range(Nnodes):
         on_boundary = B[i]
         node_i = nodes[i]
-        
-        # Build the vertex patch around i (with expansion near boundaries).
+
         j = np.array([i])
         j = process_boundary_3d(
             elems, nodes_to_elem_array, j, B, on_boundary,
             dofs, dofmap_list, node_i,
         )
-        # For interior vertices we still want a patch with enough DOFs.
-        # The first test inside process_boundary_3d already handles this
-        # because has_interior is True immediately; but if the 1-ring is
-        # too small for a cubic fit, we expand one more time.
         L = _patch(nodes_to_elem_array, dofmap_list, j)
         if L.shape[0] < N_MIN_PATCH:
             j_new = j.copy()
@@ -283,9 +350,7 @@ def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
                 j_new = np.union1d(j_new, vertex_neighbors(elems, nodes_to_elem_array, k))
             j = j_new
             L = _patch(nodes_to_elem_array, dofmap_list, j)
-        
-        # Per-direction patch extents (never zero here thanks to the
-        # boundary expansion loop, but we guard anyway).
+
         hx = 0.0
         hy = 0.0
         hz = 0.0
@@ -296,49 +361,39 @@ def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
             if dx > hx: hx = dx
             if dy > hy: hy = dy
             if dz > hz: hz = dz
-        # Floor to avoid division by zero on ill-posed patches.
         if hx < H_DIR_TOL: hx = 1.0
         if hy < H_DIR_TOL: hy = 1.0
         if hz < H_DIR_TOL: hz = 1.0
-        
-        # Rescaled local coordinates of the patch DOFs.
+
         p = np.empty((L.shape[0], 3))
         for m in range(L.shape[0]):
             p[m, 0] = (dofs[L[m], 0] - node_i[0]) / hx
             p[m, 1] = (dofs[L[m], 1] - node_i[1]) / hy
             p[m, 2] = (dofs[L[m], 2] - node_i[2]) / hz
-        
+
         A = _build_vandermonde(p)
         b = np.empty(L.shape[0])
         for m in range(L.shape[0]):
             b[m] = uh[L[m]]
-        
-        # Normal equations. A^T A is 20x20 — tiny.
+
         AtA = A.T @ A
         Atb = A.T @ b
         a = np.linalg.solve(AtA, Atb)
-        
-        # Vertex value: gradient of p at the local origin is (a1, a2, a3).
+
         k_vertex = v2d[i]
         Ghuh[k_vertex, 0] = a[1] / hx
         Ghuh[k_vertex, 1] = a[2] / hy
         Ghuh[k_vertex, 2] = a[3] / hz
-        
-        # Mid-edge DOFs connected to i: accumulate with weight 1/2.
-        # The other 1/2 comes from the other endpoint when prange visits it.
+
         L_edge = find_closest_dofs(nodes, elems, nodes_to_elem_array, dofs, i)
-        
-        Ghuh_temp = np.zeros((Ndofs, 3))
         for idx in range(L_edge.shape[0]):
             l = L_edge[idx]
             x = (dofs[l, 0] - node_i[0]) / hx
             y = (dofs[l, 1] - node_i[1]) / hy
             z = (dofs[l, 2] - node_i[2]) / hz
             gx, gy, gz = _eval_grad(a, x, y, z)
-            Ghuh_temp[l, 0] += 0.5 * gx / hx
-            Ghuh_temp[l, 1] += 0.5 * gy / hy
-            Ghuh_temp[l, 2] += 0.5 * gz / hz
-        
-        Ghuh += Ghuh_temp
-    
+            Ghuh[l, 0] += 0.5 * gx / hx
+            Ghuh[l, 1] += 0.5 * gy / hy
+            Ghuh[l, 2] += 0.5 * gz / hz
+
     return Ghuh

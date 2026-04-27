@@ -1,4 +1,6 @@
+import logging
 import meshio
+logging.getLogger("meshio").setLevel(logging.ERROR)
 import gmsh
 import dolfinx
 from dolfinx.io import gmsh as gmshio

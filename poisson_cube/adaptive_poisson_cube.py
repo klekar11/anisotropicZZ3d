@@ -15,12 +15,14 @@ from solver import solve_poisson_generic
 
 def parse_args():
     p = argparse.ArgumentParser(description="Anisotropic adaptive Poisson solver")
-    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere"],
+    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere"],
                    help="Problem type (default: 1d)")
     p.add_argument("--k",        type=int, default=1, choices=[1, 2],
                    help="FE degree and estimator: 1=ZZ, 2=Naga-Zhang (default: 1)")
     p.add_argument("--results",  default=None,
                    help="Results directory name under poisson_cube/ (default: results_<problem>_k<k>)")
+    p.add_argument("--mesh",     default=None,
+                   help="Starting .mesh file; omit to generate from scratch")
     p.add_argument("--n-loop",   type=int,   default=40)
     p.add_argument("--tol-start",type=float, default=1.0,
                    help="Starting tolerance (default: 1.0)")
@@ -33,6 +35,10 @@ def parse_args():
     p.add_argument("--correction-factor", type=float, default=1.5)
     p.add_argument("--mmg3d",    default="/usr/local/bin/mmg3d_O3",
                    help="Path to mmg3d executable")
+    p.add_argument("--nosurf",   action="store_true", default=False,
+                   help="Pass -nosurf to MMG3D (preserve surface mesh, needed for tokamak)")
+    p.add_argument("--mmg-extra", default="", dest="mmg_extra",
+                   help="Additional MMG3D flags as a quoted string, e.g. \"-hausd 5.0 -ar 21\"")
     return p.parse_args()
 
 
@@ -45,12 +51,44 @@ def main():
 
     tol_values = [args.tol_start / (2**i) for i in range(args.n_tol)]
 
+    # Write a human-readable summary of all run parameters.
+    run_info_path = results_dir / "run_info.txt"
+    mmg_extra_str = args.mmg_extra if args.mmg_extra else "(none)"
+    if args.nosurf:
+        mmg_extra_str = ("-nosurf " + mmg_extra_str).strip()
+    tol_list_str = "  ".join(str(t) for t in tol_values)
+    with open(run_info_path, "w") as fh:
+        fh.write("Run configuration\n")
+        fh.write("=" * 40 + "\n")
+        fh.write(f"problem:           {args.problem}\n")
+        fh.write(f"k (estimator):     {args.k}  ({'ZZ' if args.k == 1 else 'Naga-Zhang'})\n")
+        fh.write(f"starting mesh:     {args.mesh if args.mesh else '(generated from scratch)'}\n")
+        fh.write(f"tol_start:         {args.tol_start}\n")
+        fh.write(f"n_tol:             {args.n_tol}\n")
+        fh.write(f"tolerances:        {tol_list_str}\n")
+        fh.write(f"n_loop:            {args.n_loop}\n")
+        fh.write(f"hmin:              {args.hmin}\n")
+        fh.write(f"hmax:              {args.hmax}\n")
+        fh.write(f"hgrad:             {args.hgrad}\n")
+        fh.write(f"alpha:             {args.alpha}\n")
+        fh.write(f"correction_factor: {args.correction_factor}\n")
+        fh.write(f"mmg3d:             {args.mmg3d}\n")
+        fh.write(f"mmg_extra_args:    {mmg_extra_str}\n")
+    print(f"Run info saved → {run_info_path}")
+
     f_factory, g_np, u_exact = get_problem(args.problem)
 
     def make_solver(msh):
         return solve_poisson_generic(msh, f_factory(msh), g_np, args.k)
 
-    prev_mesh_file    = None
+    mmg_extra: list | None = []
+    if args.nosurf:
+        mmg_extra.append("-nosurf")
+    if args.mmg_extra:
+        mmg_extra.extend(args.mmg_extra.split())
+    mmg_extra = mmg_extra or None
+
+    prev_mesh_file    = args.mesh   # None → generate from scratch on first TOL
     all_iter_metrics  = {}
     all_final_metrics = {}
 
@@ -75,6 +113,7 @@ def main():
             mmg3d_exe         = args.mmg3d,
             initial_mesh_file = prev_mesh_file,
             k                 = args.k,
+            mmg_extra_args    = mmg_extra,
         )
 
         prev_mesh_file = tol_dir / "meshes" / f"mesh_{args.n_loop - 1}.mesh"
@@ -89,12 +128,14 @@ def main():
     csv_path = results_dir / "convergence.csv"
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["tol", "loop_idx", "n_vertices", "TRE", "max_aspect_ratio", "avg_aspect_ratio"])
+        writer.writerow(["tol", "loop_idx", "n_vertices", "n_cells", "TRE", "max_aspect_ratio", "avg_aspect_ratio", "n_coarsen", "n_refine", "n_cells_coarsen", "n_cells_refine"])
         for tol in tol_values:
             for entry in all_iter_metrics[tol]:
                 writer.writerow([
-                    tol, entry["loop_idx"], entry["n_vertices"], entry["TRE"],
+                    tol, entry["loop_idx"], entry["n_vertices"], entry["n_cells"], entry["TRE"],
                     entry["max_aspect_ratio"], entry["avg_aspect_ratio"],
+                    entry["n_coarsen"], entry["n_refine"],
+                    entry["n_cells_coarsen"], entry["n_cells_refine"],
                 ])
     print(f"\nConvergence CSV saved → {csv_path}")
 
