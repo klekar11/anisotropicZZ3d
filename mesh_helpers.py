@@ -249,6 +249,7 @@ def adapt_mesh_mmg(
     hmin: float,
     hmax: float,
     vtk_dir: Path | str | None = None,
+    extra_args: list | None = None,
 ) -> tuple[str, str | None]:
 
     cmd = [
@@ -258,8 +259,10 @@ def adapt_mesh_mmg(
         "-out", str(output_path),
         "-hgrad", str(hgrad),
         "-hmin", str(hmin),
-        "-hmax", str(hmax)
+        "-hmax", str(hmax),
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     print(f"  Command: {' '.join(cmd)}")
 
     with open(mmg_log_file, "a") as log_f:

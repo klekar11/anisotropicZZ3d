@@ -400,9 +400,18 @@ def compute_jacobian_svd(msh: mesh.Mesh) -> dict:
         "AR":     lam_arr[:, 0] / lam_arr[:, -1],  # (n_cells,)
     }
 
-def compute_anisotropic_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr.Expr | None = None) -> np.ndarray:
-
-    G, _ = compute_G_tilde(u_h)
+def compute_anisotropic_eta(
+    u_h: fem.Function,
+    f: ufl.core.expr.Expr,
+    g_N: ufl.core.expr.Expr | None = None,
+    G: dict | None = None,
+    k: int = 1,
+) -> np.ndarray:
+    if G is None:
+        if k == 1:
+            G, _ = compute_G_tilde(u_h)
+        else:
+            G, _ = compute_G_tilde_nz(u_h)
     domain = u_h.function_space.mesh
     tdim = domain.topology.dim
 

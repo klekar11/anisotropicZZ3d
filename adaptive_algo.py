@@ -46,6 +46,7 @@ def run_adaptive_poisson(
     mmg3d_exe: str = "/usr/local/bin/mmg3d_O3",
     initial_mesh_file: Path | str | None = None,
     k: int = 1,
+    mmg_extra_args: list | None = None,
 ) -> tuple:
     """Run the anisotropic adaptive Poisson algorithm (Table 1.6).
 
@@ -200,16 +201,16 @@ def run_adaptive_poisson(
         }
         iteration_metrics.append(iter_entry)
         print(f"  AR  max={max_ar_iter:.4e}  avg={avg_ar_iter:.4e}")
-        eta_k, res1, omegas = compute_anisotropic_eta(u_h, f_rhs)
-        eta_k_i = np.asarray(res1)[None, :] * np.asarray(omegas)
-        print(f"  eta_k_i shape: {eta_k_i.shape}  (directions × cells)")
-
         if k == 1:
             G, eta_zz_fn = compute_G_tilde(u_h)
             print("  G_tilde (ZZ) computed")
         else:
             G, eta_zz_fn = compute_G_tilde_nz(u_h)
             print("  G_tilde (NZ/PPR) computed")
+
+        eta_k, res1, omegas = compute_anisotropic_eta(u_h, f_rhs, G=G, k=k)
+        eta_k_i = np.asarray(res1)[None, :] * np.asarray(omegas)
+        print(f"  eta_k_i shape: {eta_k_i.shape}  (directions × cells)")
 
         # ---- Step 4: Vertex-wise quantities -----------------------
         print("\n[4] Computing vertex-wise quantities...")
@@ -249,23 +250,23 @@ def run_adaptive_poisson(
         build_metric(h_p, Q, perm, mesh_path, sol_path)
         print(f"  Metric → {Path(sol_path).name}")
 
-        # ---- Diagnostic: metric anisotropy near the feature -------
-        verts = msh.geometry.x
-        dists = np.linalg.norm(verts, axis=1)          # distance from origin
-        shell_radius = 0.5                              # adjust if not sphere
-        P_shell = int(np.argmin(np.abs(dists - shell_radius)))
-        r_hat = verts[P_shell] / (dists[P_shell] + 1e-14)
-        M_P = Q[P_shell].T @ np.diag(1.0 / h_p[P_shell] ** 2) @ Q[P_shell]
+        # ---- Diagnostic: metric anisotropy at the vertex with largest h contrast
+        # Pick the vertex where the metric is most anisotropic (largest ratio
+        # h_max/h_min), independent of geometry or problem type.
+        h_ratio = h_p[:, 0] / (h_p[:, -1] + 1e-14)   # largest / smallest h per vertex
+        P_diag  = int(np.argmax(h_ratio))
+        # M = Q @ diag(1/h²) @ Q.T  (Q has eigenvectors as columns from eigh)
+        M_P     = Q[P_diag] @ np.diag(1.0 / h_p[P_diag] ** 2) @ Q[P_diag].T
         evals, evecs = np.linalg.eigh(M_P)
-        alignment = float(np.abs(evecs[:, -1] @ r_hat))
+        aniso_ratio = float(evals[-1] / (evals[0] + 1e-14))
         print(
-            f"  [DIAG] Metric eigenvalues near shell: "
-            f"{evals[0]:.3e}  {evals[1]:.3e}  {evals[2]:.3e}"
+            f"  [DIAG] Most anisotropic vertex (P={P_diag}):"
+            f"  h_ratio={h_ratio[P_diag]:.2f}"
+            f"  metric eigenvalues: {evals[0]:.3e}  {evals[1]:.3e}  {evals[2]:.3e}"
+            f"  λ_max/λ_min={aniso_ratio:.1f}"
         )
         print(
-            f"  [DIAG] Largest eigenvec: {evecs[:,-1].round(3)}"
-            f"  radial dir: {r_hat.round(3)}"
-            f"  |alignment|={alignment:.3f}  (1.0 = correct)"
+            f"  [DIAG] Anisotropy direction (largest eigenvec): {evecs[:, -1].round(3)}"
         )
 
         # Attach u_h to VTU explicitly on the final loop.
@@ -297,6 +298,7 @@ def run_adaptive_poisson(
                 mmg_log_file, mmg3d_exe,
                 hgrad, hmin, hmax,
                 vtk_dir=vtk_dir,
+                extra_args=mmg_extra_args,
             )
             msh = read_medit_to_dolfinx(next_mesh_path)
             print(

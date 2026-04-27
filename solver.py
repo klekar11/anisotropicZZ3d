@@ -276,9 +276,17 @@ def solve_poisson_generic(
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
 
-    if isinstance(f, ufl.core.expr.Expr):
+    if isinstance(f, fem.Function):
+        # already a coefficient — use directly
         f_coeff = f
+    elif isinstance(f, ufl.core.expr.Expr):
+        # pre-interpolate to avoid FFCX building huge quadrature tables
+        # for complex symbolic expressions (e.g. div(grad(tanh(...))))
+        F = fem.Function(V)
+        F.interpolate(fem.Expression(f, V.element.interpolation_points))
+        f_coeff = F
     else:
+        # numpy callable
         F = fem.Function(V)
         F.interpolate(f)
         f_coeff = F
