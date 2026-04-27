@@ -6,10 +6,14 @@ mmg_tests/cube_results
 mmg_tests/cube_bands_results
 parallel/
 tests/results
+tests/test_jacobian.py
+tests_nz_norm.py
 __pycache__
 poisson_cube/results*
 poisson_cube/mesh_reorder.py
 poisson_cube/nz_resul*
+
+poisson_cube/zz_res*
 poisson_cube/plot_tre_vs_vertices.py
 *.msh
 *.vtk
