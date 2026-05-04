@@ -47,6 +47,23 @@ def read_medit_to_dolfinx(path: str) -> dolfinx.mesh.Mesh:
     )
     return msh
 
+def upgrade_mesh_to_p2(msh_p1: dolfinx.mesh.Mesh) -> dolfinx.mesh.Mesh:
+    """Upgrade a P1 tetrahedral mesh to P2 geometry by generating edge midpoint nodes.
+
+    The topology (cells and vertices) is unchanged; DOLFINx interpolates the
+    identity map into the P2 coordinate space to produce midpoint coordinates.
+    """
+    from dolfinx import fem
+    p2_element = basix.ufl.element("Lagrange", "tetrahedron", 2, shape=(3,))
+    V = fem.functionspace(msh_p1, p2_element)
+    xfn = fem.Function(V)
+    xfn.interpolate(lambda x: x)
+    n_cells = msh_p1.topology.index_map(3).size_local
+    cell_dofs = np.array([V.dofmap.cell_dofs(c) for c in range(n_cells)], dtype=np.int64)
+    coords = xfn.x.array.reshape(-1, 3)
+    return dolfinx.mesh.create_mesh(MPI.COMM_SELF, cell_dofs, p2_element, coords)
+
+
 def build_dolfinx_to_medit_map(msh):
     """Return perm such that M_reordered[perm[i]] = M_dolfinx[i].
     Uses the built-in input_global_indices provided by DOLFINx."""

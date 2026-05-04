@@ -6,7 +6,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 PROBLEM="tok-sphere"            # "1d" | "sphere" | "plan" | "tok-sphere"
 K=1                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
-RESULTS="../tokamak/zz_nosurf/" # output directory name (created inside poisson_cube/)
+RESULTS="../mmg_tests/zz_tok_nosurf" # output directory name (created inside poisson_cube/)
 
 # Starting mesh:
 #   leave empty to generate the initial mesh from scratch (cube problems)
@@ -16,10 +16,10 @@ MESH="../tokamak/TCV.mesh"
 
 N_LOOP=15             # adaptive iterations per tolerance
 TOL_START=1          # first tolerance value
-N_TOL=3               # number of tolerance halvings (sequence: TOL_START / 2^i)
+N_TOL=4             # number of tolerance halvings (sequence: TOL_START / 2^i)
 
-HMAX=200
-HMIN=1e-5
+HMAX=300
+HMIN=1e-6
 HGRAD=-1
 ALPHA=0.25
 CORRECTION_FACTOR=1.5
@@ -41,7 +41,7 @@ MMG3D="/usr/local/bin/mmg3d_O3"
 #   EXTRA_ARGS=(--mmg-extra="-hausd 6.0")           # hausdorff control, no nosurf
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0")  # both
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0 -ar 21")  # multiple MMG flags
-EXTRA_ARGS=(--nosurf)
+EXTRA_ARGS=(--nosurf --mmg-extra="-hgradreq -1.0")
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
