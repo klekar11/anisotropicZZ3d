@@ -4,6 +4,9 @@
 *.vtu
 mmg_tests/cube_results
 mmg_tests/cube_bands_results
+mmg_tests/zz_cube*
+
+mmg_tests/zz_tok*
 parallel/
 tests/results
 tests/test_jacobian.py

@@ -12,7 +12,7 @@ R0_TOK      = 640.0   # major radius of the torus axis
 Z0_TOK      = 400.0   # vertical centre of the cross-section
 Rc_TOK      = 580  # poloidal R-coordinate of the shell centre (= R0_TOK → centred on axis)
 Zc_TOK      = 400.0   # poloidal Z-coordinate of the shell centre (= Z0_TOK → centred on axis)
-r_shell_TOK = 60.0    # radius of the spherical shell
+r_shell_TOK = 70    # radius of the spherical shell
 EPSILON_TOK = 10.0    # transition-layer half-width
 
 

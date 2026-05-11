@@ -39,6 +39,17 @@ def parse_args():
                    help="Pass -nosurf to MMG3D (preserve surface mesh, needed for tokamak)")
     p.add_argument("--mmg-extra", default="", dest="mmg_extra",
                    help="Additional MMG3D flags as a quoted string, e.g. \"-hausd 5.0 -ar 21\"")
+    # Tokamak wall snapping
+    p.add_argument("--snap-walls", action="store_true", default=False,
+                   help="After each MMG3D step, snap boundary vertices onto the exact cylindrical walls")
+    p.add_argument("--snap-r-inner",    type=float, default=200.0, dest="snap_r_inner",
+                   help="Exact inner cylindrical wall radius for snapping (default: 200.0)")
+    p.add_argument("--snap-r-outer",    type=float, default=800.0, dest="snap_r_outer",
+                   help="Exact outer cylindrical wall radius for snapping (default: 800.0)")
+    p.add_argument("--snap-hausd-tol",  type=float, default=10.0,  dest="snap_hausd_tol",
+                   help="Detection band half-width for snapping (default: 10.0)")
+    p.add_argument("--snap-snap-tol",   type=float, default=1e-1,  dest="snap_snap_tol",
+                   help="Skip vertices already within this distance of the exact radius (default: 0.1)")
     return p.parse_args()
 
 
@@ -74,6 +85,12 @@ def main():
         fh.write(f"correction_factor: {args.correction_factor}\n")
         fh.write(f"mmg3d:             {args.mmg3d}\n")
         fh.write(f"mmg_extra_args:    {mmg_extra_str}\n")
+        fh.write(f"snap_walls:        {args.snap_walls}\n")
+        if args.snap_walls:
+            fh.write(f"snap_r_inner:      {args.snap_r_inner}\n")
+            fh.write(f"snap_r_outer:      {args.snap_r_outer}\n")
+            fh.write(f"snap_hausd_tol:    {args.snap_hausd_tol}\n")
+            fh.write(f"snap_snap_tol:     {args.snap_snap_tol}\n")
     print(f"Run info saved → {run_info_path}")
 
     f_factory, g_np, u_exact = get_problem(args.problem)
@@ -87,6 +104,15 @@ def main():
     if args.mmg_extra:
         mmg_extra.extend(args.mmg_extra.split())
     mmg_extra = mmg_extra or None
+
+    tok_snap = None
+    if args.snap_walls:
+        tok_snap = {
+            "r_inner":   args.snap_r_inner,
+            "r_outer":   args.snap_r_outer,
+            "hausd_tol": args.snap_hausd_tol,
+            "snap_tol":  args.snap_snap_tol,
+        }
 
     prev_mesh_file    = args.mesh   # None → generate from scratch on first TOL
     all_iter_metrics  = {}
@@ -114,6 +140,7 @@ def main():
             initial_mesh_file = prev_mesh_file,
             k                 = args.k,
             mmg_extra_args    = mmg_extra,
+            tok_snap          = tok_snap,
         )
 
         prev_mesh_file = tol_dir / "meshes" / f"mesh_{args.n_loop - 1}.mesh"

@@ -9,9 +9,55 @@ import numpy as np
 import basix.ufl
 from mpi4py import MPI
 import subprocess
+import tempfile
 from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
+
+# Medit keywords that meshio either warns about or fails hard on.
+# We strip these sections before handing the file to meshio, using a
+# temporary copy so the original mesh file stays intact for subsequent
+# MMG / ParMmg calls that may need these sections.
+_MEDIT_MESHIO_UNSUPPORTED = frozenset({
+    "RequiredEdges",
+    "RequiredVertices",
+    "RequiredTriangles",
+    "RequiredTetrahedra",
+    "Ridges",
+    "Corners",
+    "NormalsAtVertices",
+    "Tangents",
+    "TangentAtVertices",
+})
+
+
+def _medit_strip_unsupported(path: Path) -> str:
+    """Return the content of a Medit .mesh file with unsupported sections removed."""
+    lines = Path(path).read_text().splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        keyword = lines[i].strip()
+        if keyword in _MEDIT_MESHIO_UNSUPPORTED:
+            i += 1  # skip keyword line
+            # skip optional blank lines before the count
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+            if i < len(lines):
+                try:
+                    count = int(lines[i].strip())
+                    i += 1  # skip count line
+                    skipped = 0
+                    while i < len(lines) and skipped < count:
+                        if lines[i].strip():
+                            skipped += 1
+                        i += 1
+                except ValueError:
+                    pass  # no integer count line — just skip the keyword itself
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out) + "\n"
 
 # def read_medit_to_dolfinx(path: str) -> dolfinx.mesh.Mesh:
 #     gmsh.initialize()
@@ -30,7 +76,14 @@ from scipy.spatial import cKDTree
 #     return mesh_data.mesh
 
 def read_medit_to_dolfinx(path: str) -> dolfinx.mesh.Mesh:
-    m = meshio.read(path)
+    clean = _medit_strip_unsupported(Path(path))
+    with tempfile.NamedTemporaryFile(suffix=".mesh", mode="w", delete=False) as tmp:
+        tmp.write(clean)
+        tmp_path = tmp.name
+    try:
+        m = meshio.read(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
     tets = m.cells_dict.get("tetra")
     if tets is None:
         raise ValueError("No tetrahedra found in the mesh file.")
@@ -293,9 +346,85 @@ def adapt_mesh_mmg(
         )
 
     if result.returncode != 0:
-        print(f"  WARNING: MMG3D returned code {result.returncode}")
-    else:
-        print("  MMG3D completed successfully")
+        raise RuntimeError(
+            f"MMG3D failed with return code {result.returncode}. "
+            f"Check log: {mmg_log_file}"
+        )
+    print("  MMG3D completed successfully")
+
+    vtu_path = to_vtu(str(output_path), output_dir=vtk_dir)
+    if vtu_path:
+        print(f"  VTU saved: {Path(vtu_path).name}")
+
+    return str(output_path), vtu_path
+
+
+def adapt_mesh_parmmg(
+    input_path: "Path | str",
+    output_path: "Path | str",
+    sol_path: "Path | str",
+    parmmg_log_file: "Path | str",
+    parmmg_exe: str,
+    hgrad: float,
+    hmin: float,
+    hmax: float,
+    np_mpi: int = 4,
+    niter: int = 6,
+    nlayers: int = 3,
+    mesh_size: int | None = None,
+    mpirun_exe: str = "mpirun",
+    vtk_dir: "Path | str | None" = None,
+    extra_args: list | None = None,
+) -> tuple[str, str | None]:
+    """Run ParMmg for metric-based anisotropic adaptation.
+
+    Drop-in replacement for ``adapt_mesh_mmg``.  Pass ``-hgradreq`` via
+    ``extra_args``, e.g. ``extra_args=["-hgradreq", "3.0"]``.
+
+    Parameters
+    ----------
+    np_mpi : Number of MPI processes.
+    niter : Remeshing-repartitioning iterations inside ParMmg (``-niter``).
+    nlayers : Interface displacement layers per repartitioning (``-nlayers``).
+    mesh_size : Target elements per sequential Mmg chunk (``-mesh-size``); None → auto.
+    """
+    cmd = [
+        mpirun_exe,
+        "-np", str(np_mpi),
+        parmmg_exe,
+        "-in",      str(input_path),
+        "-sol",     str(sol_path),
+        "-out",     str(output_path),
+        "-hgrad",   str(hgrad),
+        "-hmin",    str(hmin),
+        "-hmax",    str(hmax),
+        "-niter",   str(niter),
+        "-nlayers", str(nlayers),
+    ]
+    if mesh_size is not None:
+        cmd.extend(["-mesh-size", str(mesh_size)])
+    if extra_args:
+        cmd.extend([str(a) for a in extra_args])
+
+    print(f"  Command: {' '.join(cmd)}")
+
+    with open(parmmg_log_file, "a") as log_f:
+        log_f.write(f"\n{'=' * 70}\n")
+        log_f.write(
+            f"PARMMG ADAPT {Path(input_path).name} -> "
+            f"{Path(output_path).name}  ({np_mpi} procs)\n"
+        )
+        log_f.write(f"{'=' * 70}\n")
+        result = subprocess.run(
+            cmd, stdout=log_f, stderr=subprocess.STDOUT, text=True
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ParMmg failed with return code {result.returncode}. "
+            f"Check log: {parmmg_log_file}"
+        )
+    print("  ParMmg completed successfully")
 
     vtu_path = to_vtu(str(output_path), output_dir=vtk_dir)
     if vtu_path:
@@ -376,7 +505,14 @@ def to_vtu(mesh_path, output_dir=None, write_solution=False, u_h=None, dof_to_me
     else:
         vtu_path = mesh_path.replace(".mesh", ".vtu")
 
-    mesh = meshio.read(mesh_path)
+    clean = _medit_strip_unsupported(Path(mesh_path))
+    with tempfile.NamedTemporaryFile(suffix=".mesh", mode="w", delete=False) as tmp:
+        tmp.write(clean)
+        tmp_path = tmp.name
+    try:
+        mesh = meshio.read(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
     # Keep only tetrahedral cells (discard any lower-dim leftovers)
     tet_cells = [c for c in mesh.cells if c.type == "tetra"]
@@ -394,33 +530,119 @@ def to_vtu(mesh_path, output_dir=None, write_solution=False, u_h=None, dof_to_me
             values = np.asarray(u_h, dtype=np.float64).reshape(-1)
 
         n_points = mesh.points.shape[0]
-        if values.size == n_points:
-            point_values = values
-        elif values.size % n_points == 0:
-            n_comp = values.size // n_points
-            point_values = values.reshape(n_points, n_comp)
-        else:
-            raise ValueError(
-                "u_h size is incompatible with mesh points: "
-                f"got {values.size} values for {n_points} points"
-            )
 
         if dof_to_medit is not None:
             perm = np.asarray(dof_to_medit, dtype=np.int64)
-            if perm.size != n_points:
+            n_dof = perm.size
+            # MMG3D can produce required/corner vertices that are stored in the
+            # Medit file but unreferenced by any tetrahedron; DOLFINx drops those,
+            # so n_dof may be smaller than n_points by one (or more).
+            if values.size == n_dof:
+                src = values
+            elif values.size % n_dof == 0:
+                src = values.reshape(n_dof, values.size // n_dof)
+            else:
                 raise ValueError(
-                    "dof_to_medit size mismatch: "
-                    f"got {perm.size}, expected {n_points}"
+                    f"u_h size {values.size} is not a multiple of dof_to_medit "
+                    f"size {n_dof}"
                 )
-            reordered = np.empty_like(point_values)
-            reordered[perm] = point_values
+            if src.ndim == 1:
+                reordered = np.zeros(n_points, dtype=np.float64)
+            else:
+                reordered = np.zeros((n_points, src.shape[1]), dtype=np.float64)
+            reordered[perm] = src
             point_values = reordered
+        else:
+            if values.size == n_points:
+                point_values = values
+            elif values.size % n_points == 0:
+                n_comp = values.size // n_points
+                point_values = values.reshape(n_points, n_comp)
+            else:
+                raise ValueError(
+                    "u_h size is incompatible with mesh points: "
+                    f"got {values.size} values for {n_points} points"
+                )
 
         point_data["u_h"] = point_values
 
     meshio.write(vtu_path, meshio.Mesh(points=mesh.points, cells=tet_cells, point_data=point_data))
     print(f"[VTK]  {mesh_path}  to  {vtu_path}")
     return vtu_path
+
+def snap_tokamak_wall_vertices(
+    mesh_path: Path | str,
+    r_inner: float,
+    r_outer: float,
+    hausd_tol: float = 10.0,
+    snap_tol: float = 1e-1,
+) -> int:
+    """Project tokamak boundary vertices onto the exact cylindrical walls in-place.
+
+    After MMG3D remeshing with -hausd, vertices on the inner/outer cylindrical
+    walls may sit at R_xy = sqrt(x²+y²) slightly off the exact value.  For each
+    vertex where snap_tol < |R_xy - R_wall| < hausd_tol the (x, y) coordinates
+    are rescaled to place the vertex exactly on the target cylinder while z is
+    left unchanged.  The .mesh file is overwritten in-place.
+
+    Parameters
+    ----------
+    mesh_path   Medit .mesh file to modify in-place.
+    r_inner     Exact inner-wall cylindrical radius.
+    r_outer     Exact outer-wall cylindrical radius.
+    hausd_tol   Half-width of the detection band: only vertices with
+                |R_xy - R| < hausd_tol are treated as boundary candidates.
+    snap_tol    Vertices already within snap_tol of the exact radius are skipped.
+
+    Returns
+    -------
+    Number of vertices snapped.
+    """
+    mesh_path = Path(mesh_path)
+    lines = mesh_path.read_text().splitlines()
+
+    i = 0
+    while i < len(lines) and lines[i].strip() != "Vertices":
+        i += 1
+    if i >= len(lines):
+        raise ValueError(f"No 'Vertices' section found in {mesh_path}")
+
+    i += 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        raise ValueError(f"Missing vertex count after 'Vertices' in {mesh_path}")
+
+    n_verts = int(lines[i].strip())
+    vert_start = i + 1
+
+    n_snapped = 0
+    for j in range(n_verts):
+        parts = lines[vert_start + j].split()
+        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+        ref = parts[3]
+
+        Rxy = np.sqrt(x * x + y * y)
+        if Rxy < 1e-14:
+            continue
+
+        for R_target in (r_inner, r_outer):
+            dist = abs(Rxy - R_target)
+            if snap_tol < dist < hausd_tol:
+                scale = R_target / Rxy
+                lines[vert_start + j] = (
+                    f"{x * scale:.14e} {y * scale:.14e} {z:.14e} {ref}"
+                )
+                n_snapped += 1
+                break
+
+    mesh_path.write_text("\n".join(lines) + "\n")
+    print(
+        f"[snap] {mesh_path.name}: snapped {n_snapped}/{n_verts} vertices "
+        f"onto cylindrical walls (r_inner={r_inner}, r_outer={r_outer})"
+    )
+    return n_snapped
+
 
 # a bit overkill maybe just better to generate the first mesh in mmg
 def write_dolfinx_to_medit(msh, path: str) -> None:
