@@ -4,22 +4,22 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-PROBLEM="tok-sphere"            # "1d" | "sphere" | "plan" | "tok-sphere"
-K=1                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
-RESULTS="../mmg_tests/zz_tok_nosurf" # output directory name (created inside poisson_cube/)
+PROBLEM="1d"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall"
+K=2                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
+RESULTS="NZ_1d_diagnostic" # output directory name (created inside poisson_cube/)
 
 # Starting mesh:
 #   leave empty to generate the initial mesh from scratch (cube problems)
 #   for tok-sphere set to the TCV mesh relative to this script:
 #     MESH="$SCRIPT_DIR/../tokamak/TCV.mesh"
-MESH="../tokamak/TCV.mesh"
+MESH=""
 
-N_LOOP=15             # adaptive iterations per tolerance
+N_LOOP=20             # adaptive iterations per tolerance
 TOL_START=1          # first tolerance value
-N_TOL=4             # number of tolerance halvings (sequence: TOL_START / 2^i)
+N_TOL=5            # number of tolerance halvings (sequence: TOL_START / 2^i)
 
-HMAX=300
-HMIN=1e-6
+HMAX=1
+HMIN=1e-7
 HGRAD=-1
 ALPHA=0.25
 CORRECTION_FACTOR=1.5
@@ -41,7 +41,12 @@ MMG3D="/usr/local/bin/mmg3d_O3"
 #   EXTRA_ARGS=(--mmg-extra="-hausd 6.0")           # hausdorff control, no nosurf
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0")  # both
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0 -ar 21")  # multiple MMG flags
-EXTRA_ARGS=(--nosurf --mmg-extra="-hgradreq -1.0")
+
+EXTRA_ARGS=()     # hausdorff control, no nosurf
+# Tokamak wall snapping — set SNAP_WALLS to true to enable
+SNAP_WALLS=false
+SNAP_R_INNER=200.0
+SNAP_R_OUTER=800.0
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +54,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MESH_ARG=()
 if [ -n "$MESH" ]; then
     MESH_ARG=(--mesh "$MESH")
+fi
+
+SNAP_ARGS=()
+if [ "$SNAP_WALLS" = "true" ]; then
+    SNAP_ARGS=(
+        --snap-walls
+        --snap-r-inner "$SNAP_R_INNER"
+        --snap-r-outer "$SNAP_R_OUTER"
+    )
 fi
 
 LOG_DIR="$SCRIPT_DIR/$RESULTS"
@@ -70,4 +84,5 @@ python -u "$SCRIPT_DIR/adaptive_poisson_cube.py" \
     --correction-factor "$CORRECTION_FACTOR" \
     --mmg3d             "$MMG3D"             \
     "${EXTRA_ARGS[@]}" \
+    "${SNAP_ARGS[@]}" \
     2>&1 | tee "$LOG_FILE"

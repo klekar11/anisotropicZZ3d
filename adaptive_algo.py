@@ -1,4 +1,5 @@
 # pyright: reportMissingImports=false, reportMissingModuleSource=false
+import csv
 import os
 import shutil
 from pathlib import Path
@@ -17,6 +18,7 @@ from mesh_helpers import (
     adapt_mesh_mmg,
     save_computed_quantities,
     snap_tokamak_wall_vertices,
+    get_boundary_vertex_indices,
 )
 from eta_estimator1 import (
     compute_jacobian_svd,
@@ -30,6 +32,225 @@ from eta_estimator1 import (
     compute_gradient_dg0,
 )
 from error_metrics import compute_error_metrics, compute_error_metrics_ZZ, compute_error_norms
+
+
+class PPRConvergenceTracker:
+    """Track PPR gradient-recovery convergence across multiple adaptive runs.
+
+    After each completed adaptive run (at a given tolerance), call
+    :meth:`record` to store three L² gradient errors:
+
+      A = ||∇u_h − ∇u||          true FE gradient error
+      B = ||∇u_h − G_nz||        PPR–FE residual
+      C = ||G_nz − ∇u||          PPR recovery error (vs. exact)
+
+    Expected rates (P2, w.r.t. h_z in the boundary layer):
+      A ~ O(h²),  B ~ O(h²),  C ~ O(h³) if superconvergent.
+
+    The representative mesh size h_z is the median of ``h_p[:, 2]`` (the
+    z-component of the anisotropic mesh-size array) over all vertices
+    inside the boundary layer, defined by
+    ``|x[layer_dir] − layer_centre| < layer_half_width``.
+
+    Parameters
+    ----------
+    layer_dir :
+        Coordinate index (0=x, 1=y, 2=z) that defines the layer normal.
+    layer_centre :
+        Location of the layer centre along ``layer_dir``.
+    layer_half_width :
+        Half-width of the layer used to select representative vertices.
+    """
+
+    def __init__(
+        self,
+        layer_dir: int = 0,
+        layer_centre: float = 0.0,
+        layer_half_width: float = 0.05,
+    ) -> None:
+        self.layer_dir = layer_dir
+        self.layer_centre = layer_centre
+        self.layer_half_width = layer_half_width
+        self._records: list[dict] = []
+
+    # ------------------------------------------------------------------
+    def record(
+        self,
+        tol: float,
+        msh,
+        u_h,
+        Gh_func,
+        grad_u_exact,
+        h_p: "np.ndarray | None" = None,
+    ) -> None:
+        """Record one run's errors and representative h_z.
+
+        Parameters
+        ----------
+        tol :
+            Equidistribution tolerance for this run.
+        msh :
+            Converged DOLFINx mesh.
+        u_h :
+            Converged FEM solution (CG1 or CG2).
+        Gh_func :
+            Callable ``Gh_func(u_h) -> fem.Function`` returning the PPR
+            recovered gradient (e.g. ``nz_eta_estimatorP2.Gh``).
+        grad_u_exact :
+            Callable compatible with ``fem.Function.interpolate`` on a
+            vector space: ``x`` shape ``(gdim, n_dofs)`` → ``(gdim, n_dofs)``.
+        h_p :
+            Optional ``(n_vertices, tdim)`` array from :func:`adapt_h`.
+            When provided ``h_p[:, 2]`` is used for h_z; otherwise h_z
+            is estimated from each in-layer cell's z-vertex range.
+        """
+        from dolfinx import fem as _fem
+        import ufl as _ufl
+        from dolfinx.fem import form as _form
+
+        gdim = msh.geometry.dim
+        tdim = msh.topology.dim
+        coords = msh.geometry.x          # (n_vertices, gdim)
+
+        # ---- representative h_z in the boundary layer ----------------
+        vert_in_layer = (
+            np.abs(coords[:, self.layer_dir] - self.layer_centre)
+            < self.layer_half_width
+        )
+        if h_p is not None:
+            h_z_vals = h_p[vert_in_layer, 2]
+        else:
+            msh.topology.create_connectivity(tdim, 0)
+            ctv = msh.topology.connectivity(tdim, 0).array.reshape(
+                -1, tdim + 1
+            )
+            bary_dir = coords[ctv, self.layer_dir].mean(axis=1)
+            cell_in_layer = (
+                np.abs(bary_dir - self.layer_centre) < self.layer_half_width
+            )
+            z_c = coords[:, 2]
+            h_z_cells = z_c[ctv].max(axis=1) - z_c[ctv].min(axis=1)
+            h_z_vals = h_z_cells[cell_in_layer]
+
+        if len(h_z_vals) == 0:
+            print(
+                f"  [PPRTracker] WARNING: no mesh entities found in layer "
+                f"for tol={tol:.3e}; skipping record."
+            )
+            return
+        h_layer = float(np.median(h_z_vals))
+
+        # ---- PPR recovered gradient (P2 vector fem.Function) ---------
+        G_nz = Gh_func(u_h)
+
+        # ---- exact gradient in a high-degree CG vector space ---------
+        deg_ex = u_h.function_space.ufl_element().degree + 2
+        V_grad = _fem.functionspace(msh, ("Lagrange", deg_ex, (gdim,)))
+        grad_ex_fn = _fem.Function(V_grad, name="grad_u_exact")
+        grad_ex_fn.interpolate(grad_u_exact)
+
+        # ---- A = ||∇u_h − ∇u|| (true FE gradient error) -------------
+        e_A = _ufl.grad(u_h) - grad_ex_fn
+        A = float(np.sqrt(
+            _fem.assemble_scalar(_form(_ufl.inner(e_A, e_A) * _ufl.dx))
+        ))
+
+        # ---- B = ||∇u_h − G_nz|| (PPR–FE residual) ------------------
+        e_B = _ufl.grad(u_h) - G_nz
+        B = float(np.sqrt(
+            _fem.assemble_scalar(_form(_ufl.inner(e_B, e_B) * _ufl.dx))
+        ))
+
+        # ---- C = ||G_nz − ∇u|| (PPR recovery vs. exact) -------------
+        e_C = G_nz - grad_ex_fn
+        C = float(np.sqrt(
+            _fem.assemble_scalar(_form(_ufl.inner(e_C, e_C) * _ufl.dx))
+        ))
+
+        entry = {"tol": tol, "h_layer": h_layer, "A": A, "B": B, "C": C}
+        self._records.append(entry)
+        print(
+            f"  [PPRTracker] tol={tol:.3e}  h_z={h_layer:.3e}"
+            f"  A={A:.3e}  B={B:.3e}  C={C:.3e}"
+        )
+
+    # ------------------------------------------------------------------
+    def _sorted(self) -> list[dict]:
+        return sorted(self._records, key=lambda r: r["h_layer"])
+
+    def print_table(self) -> None:
+        """Print a convergence table sorted by ascending h_z."""
+        recs = self._sorted()
+        header = (
+            f"{'tol':>10}  {'h_z':>10}  {'A':>10}  {'B':>10}  {'C':>10}"
+            f"  {'rate_A':>7}  {'rate_B':>7}  {'rate_C':>7}"
+        )
+        sep = "─" * len(header)
+        print("\n" + header)
+        print(sep)
+        for k, r in enumerate(recs):
+            if k == 0:
+                rate_str = f"{'—':>7}  {'—':>7}  {'—':>7}"
+            else:
+                prev = recs[k - 1]
+                log_h = np.log(r["h_layer"] / prev["h_layer"])
+                ra = np.log(r["A"] / prev["A"]) / log_h
+                rb = np.log(r["B"] / prev["B"]) / log_h
+                rc = np.log(r["C"] / prev["C"]) / log_h
+                rate_str = f"{ra:7.2f}  {rb:7.2f}  {rc:7.2f}"
+            print(
+                f"  {r['tol']:>8.3e}  {r['h_layer']:>10.3e}"
+                f"  {r['A']:>10.3e}  {r['B']:>10.3e}  {r['C']:>10.3e}"
+                f"  {rate_str}"
+            )
+
+    def plot(self, filename: str = "ppr_convergence.pdf") -> None:
+        """Save a log–log convergence plot to *filename*."""
+        import matplotlib.pyplot as plt
+
+        recs = self._sorted()
+        if len(recs) == 0:
+            print("  [PPRTracker] No records yet — nothing to plot.")
+            return
+
+        h = np.array([r["h_layer"] for r in recs])
+        A = np.array([r["A"] for r in recs])
+        B = np.array([r["B"] for r in recs])
+        C = np.array([r["C"] for r in recs])
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.loglog(h, A, "b-o", label=r"$A=\|\nabla u_h-\nabla u\|$")
+        ax.loglog(h, B, "r-s", label=r"$B=\|\nabla u_h-G_{nz}\|$")
+        ax.loglog(h, C, "g-^", label=r"$C=\|G_{nz}-\nabla u\|$")
+
+        # Reference slopes — only drawn when there are at least 2 points
+        if len(recs) >= 2:
+            i_mid = len(recs) // 2
+            h0 = h[i_mid]
+            ax.loglog(
+                h, A[i_mid] * (h / h0) ** 2,
+                "b--", alpha=0.45, lw=1.2, label=r"$O(h^2)$",
+            )
+            ax.loglog(
+                h, C[i_mid] * (h / h0) ** 3,
+                "g--", alpha=0.45, lw=1.2, label=r"$O(h^3)$",
+            )
+
+        ax.set_xlabel(r"$h_z$ (median in boundary layer)")
+        ax.set_ylabel(r"$L^2$ gradient error")
+        ax.set_title("PPR gradient-recovery convergence")
+        ax.legend(fontsize=8, loc="upper left")
+        ax.grid(True, which="both", alpha=0.3)
+        fig.tight_layout()
+
+        out = Path(filename).resolve()
+        fig.savefig(str(out), dpi=150)
+        # Also save a PNG alongside the PDF for quick viewing
+        png_out = out.with_suffix(".png")
+        fig.savefig(str(png_out), dpi=150)
+        plt.close(fig)
+        print(f"  [PPRTracker] Convergence plot saved → {out}")
+        print(f"  [PPRTracker]                    PNG → {png_out}")
 
 
 def run_adaptive_poisson(
@@ -86,8 +307,7 @@ def run_adaptive_poisson(
     tok_snap :
         When not ``None``, snap tokamak boundary vertices onto the exact
         cylindrical walls after each mesh generation.  Must be a dict with
-        keys ``r_inner`` (float) and ``r_outer`` (float); optional keys
-        ``hausd_tol`` (default 10.0) and ``snap_tol`` (default 0.1).
+        keys ``r_inner`` (float) and ``r_outer`` (float).
 
     Returns
     -------
@@ -146,14 +366,34 @@ def run_adaptive_poisson(
         print(f"\n[STEP 1] Using provided initial mesh: {initial_mesh_file}")
         shutil.copy2(str(initial_mesh_file), mesh_0_path)
 
+    # ---- Snap statistics CSVs (one per face, written/appended each snap) ----
+    _SNAP_FACES = ("inner", "outer", "bottom", "top")
+    _snap_csv: dict[str, Path] = {}
     if tok_snap is not None:
-        snap_tokamak_wall_vertices(
+        _CSV_HDR = ["mesh_idx", "total", "snapped", "bisected",
+                    "mean_dist_bisected", "std_dist_bisected", "max_dist_bisected"]
+        for _face in _SNAP_FACES:
+            _p = results_dir / f"snap_stats_{_face}.csv"
+            _snap_csv[_face] = _p
+            with open(_p, "w", newline="") as _f:
+                csv.writer(_f).writerow(_CSV_HDR)
+
+    def _write_snap_row(mesh_idx: int, snap_result: dict) -> None:
+        for _face in _SNAP_FACES:
+            s = snap_result[_face]
+            with open(_snap_csv[_face], "a", newline="") as _f:
+                csv.writer(_f).writerow([
+                    mesh_idx, s["total"], s["snapped"], s["bisected"],
+                    s["mean_dist"], s["std_dist"], s["max_dist"],
+                ])
+
+    if tok_snap is not None:
+        _snap_result = snap_tokamak_wall_vertices(
             mesh_0_path,
             r_inner=tok_snap["r_inner"],
             r_outer=tok_snap["r_outer"],
-            hausd_tol=tok_snap.get("hausd_tol", 10.0),
-            snap_tol=tok_snap.get("snap_tol", 1e-1),
         )
+        _write_snap_row(0, _snap_result)
 
     msh = read_medit_to_dolfinx(mesh_0_path)
     print(
@@ -192,12 +432,17 @@ def run_adaptive_poisson(
         norm_grad_e, norm_grad_u, norm_grad_uh = compute_error_norms(
             u_h, u_numpy, degree_raise
         )
-        tre_iter = float(norm_grad_e / norm_grad_u) if norm_grad_u > 1e-30 else float('nan')
+        tre_iter = float(norm_grad_e / norm_grad_uh) if norm_grad_uh > 1e-30 else float('nan')
         print(f"  TRE={tre_iter:.6e}  n_vertices={n_vertices_iter}")
         if not np.isfinite(tre_iter):
             print("  WARNING: TRE is NaN/inf — solution is degenerate, stopping loop.")
             break
-
+# ---- Step 2c: PPR diagnostic (remove after debugging) -----
+        if k == 2:
+            from nz_eta_estimatorP2 import Gh as _Gh_diag
+            from diagnose_ppr import diagnose_ppr
+            print(f"\n[2c] PPR diagnostic (loop {loop_idx}):")
+            diagnose_ppr(u_h, u_numpy, _Gh_diag, degree_raise=degree_raise)
         # ---- Step 3: Cell-wise quantities -------------------------
         print("\n[3] Computing cell-wise quantities...")
         svd = compute_jacobian_svd(msh)
@@ -262,6 +507,22 @@ def run_adaptive_poisson(
             f"refine ≥1 vtx: {n_cells_refine}/{n_cells_iter}"
         )
 
+        # ---- Step 5b: Cap boundary anisotropy to surface curvature ----
+        if tok_snap is not None:
+            boundary_verts = get_boundary_vertex_indices(msh)
+            bnd_cell_mask = np.any(np.isin(ctv, boundary_verts), axis=1)
+            max_ar_bnd = float(np.max(ar[bnd_cell_mask])) if np.any(bnd_cell_mask) else float('nan')
+            print(f"  Max AR at boundary cells: {max_ar_bnd:.4e}")
+            for j in boundary_verts:
+                h_sorted = np.sort(h_p[j])
+                h_min_j = h_sorted[0]
+                x = msh.geometry.x[j]
+                R_local = np.sqrt(x[0]**2 + x[1]**2)
+                if R_local < 1e-10:
+                    continue
+                h_max_tangential = np.sqrt(8.0 * R_local * h_min_j)
+                h_p[j] = np.clip(h_p[j], h_min_j, h_max_tangential)
+
         # ---- Step 6: Build metric tensor --------------------------
         print("\n[6] Building metric tensor...")
         mesh_path = str(meshes_dir / f"mesh_{loop_idx}.mesh")
@@ -300,13 +561,12 @@ def run_adaptive_poisson(
                 extra_args=mmg_extra_args,
             )
             if tok_snap is not None:
-                snap_tokamak_wall_vertices(
+                _snap_result = snap_tokamak_wall_vertices(
                     next_mesh_path,
                     r_inner=tok_snap["r_inner"],
                     r_outer=tok_snap["r_outer"],
-                    hausd_tol=tok_snap.get("hausd_tol", 10.0),
-                    snap_tol=tok_snap.get("snap_tol", 1e-1),
                 )
+                _write_snap_row(loop_idx + 1, _snap_result)
             msh = read_medit_to_dolfinx(next_mesh_path)
             print(
                 f"  New mesh: "

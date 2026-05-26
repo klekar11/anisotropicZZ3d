@@ -570,81 +570,236 @@ def to_vtu(mesh_path, output_dir=None, write_solution=False, u_h=None, dof_to_me
     print(f"[VTK]  {mesh_path}  to  {vtu_path}")
     return vtu_path
 
+def get_boundary_vertex_indices(msh) -> np.ndarray:
+    """Return 0-based geometry vertex indices of all boundary vertices."""
+    fdim = msh.topology.dim - 1
+    msh.topology.create_connectivity(fdim, 0)
+    ext_f = exterior_facet_indices(msh.topology)
+    f2v = msh.topology.connectivity(fdim, 0)
+    bverts = set()
+    for fi in ext_f:
+        bverts.update(f2v.links(fi).tolist())
+    return np.fromiter(bverts, dtype=np.intp)
+
+
 def snap_tokamak_wall_vertices(
     mesh_path: Path | str,
     r_inner: float,
     r_outer: float,
-    hausd_tol: float = 10.0,
-    snap_tol: float = 1e-1,
-) -> int:
-    """Project tokamak boundary vertices onto the exact cylindrical walls in-place.
+    z_bottom: float | None = 0,
+    z_top: float | None = 800,
+    normal_z_thresh: float = 0.5,
+) -> dict:
+    """Snap boundary vertices onto exact tokamak geometry, with tet-safety.
 
-    After MMG3D remeshing with -hausd, vertices on the inner/outer cylindrical
-    walls may sit at R_xy = sqrt(x²+y²) slightly off the exact value.  For each
-    vertex where snap_tol < |R_xy - R_wall| < hausd_tol the (x, y) coordinates
-    are rescaled to place the vertex exactly on the target cylinder while z is
-    left unchanged.  The .mesh file is overwritten in-place.
-
-    Parameters
-    ----------
-    mesh_path   Medit .mesh file to modify in-place.
-    r_inner     Exact inner-wall cylindrical radius.
-    r_outer     Exact outer-wall cylindrical radius.
-    hausd_tol   Half-width of the detection band: only vertices with
-                |R_xy - R| < hausd_tol are treated as boundary candidates.
-    snap_tol    Vertices already within snap_tol of the exact radius are skipped.
+    Cylindrical-wall vertices are projected to r_inner or r_outer.
+    Cap vertices (if z_bottom/z_top given) are projected to the exact z-plane.
+    A bisection fallback prevents any tetrahedron from being inverted.
 
     Returns
     -------
-    Number of vertices snapped.
+    dict with keys "inner", "outer", "bottom", "top", each mapping to:
+        total, snapped, bisected, mean_dist, std_dist, max_dist
+    (dist fields measure residual distance to exact surface for bisected vertices only)
     """
     mesh_path = Path(mesh_path)
     lines = mesh_path.read_text().splitlines()
 
-    i = 0
-    while i < len(lines) and lines[i].strip() != "Vertices":
-        i += 1
-    if i >= len(lines):
-        raise ValueError(f"No 'Vertices' section found in {mesh_path}")
+    def _find_section(name: str) -> int:
+        for idx, ln in enumerate(lines):
+            if ln.strip() == name:
+                return idx
+        return -1
 
-    i += 1
-    while i < len(lines) and not lines[i].strip():
-        i += 1
-    if i >= len(lines):
-        raise ValueError(f"Missing vertex count after 'Vertices' in {mesh_path}")
+    def _skip_blank(idx: int) -> int:
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        return idx
 
-    n_verts = int(lines[i].strip())
-    vert_start = i + 1
+    # ---- Parse Vertices ----
+    vi = _find_section("Vertices")
+    if vi < 0:
+        raise ValueError("No 'Vertices' section")
+    vi = _skip_blank(vi + 1)
+    n_verts = int(lines[vi].strip())
+    vert_start = vi + 1
 
-    n_snapped = 0
+    coords = np.empty((n_verts, 3))
+    refs: list[str] = []
     for j in range(n_verts):
         parts = lines[vert_start + j].split()
-        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
-        ref = parts[3]
+        coords[j] = [float(parts[0]), float(parts[1]), float(parts[2])]
+        refs.append(parts[3])
 
-        Rxy = np.sqrt(x * x + y * y)
-        if Rxy < 1e-14:
+    # ---- Parse Triangles → classify wall vs cap vertices ----
+    wall_verts: set[int] = set()
+    cap_verts: set[int] = set()
+
+    ti = _find_section("Triangles")
+    if ti >= 0:
+        ti = _skip_blank(ti + 1)
+        n_tri = int(lines[ti].strip())
+        for k in range(n_tri):
+            parts = lines[ti + 1 + k].split()
+            i0, i1, i2 = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2]) - 1
+            a = coords[i1] - coords[i0]
+            b = coords[i2] - coords[i0]
+            nx = a[1]*b[2] - a[2]*b[1]
+            ny = a[2]*b[0] - a[0]*b[2]
+            nz = a[0]*b[1] - a[1]*b[0]
+            n_mag = np.sqrt(nx*nx + ny*ny + nz*nz)
+            if n_mag < 1e-14:
+                continue
+            if abs(nz) / n_mag < normal_z_thresh:
+                wall_verts.update([i0, i1, i2])
+            else:
+                cap_verts.update([i0, i1, i2])
+
+    # ---- Parse Tetrahedra (needed for inversion check) ----
+    ei = _find_section("Tetrahedra")
+    if ei < 0:
+        raise ValueError("No 'Tetrahedra' section")
+    ei = _skip_blank(ei + 1)
+    n_tets = int(lines[ei].strip())
+    tets = np.empty((n_tets, 4), dtype=np.int64)
+    for k in range(n_tets):
+        parts = lines[ei + 1 + k].split()
+        tets[k] = [int(parts[m]) - 1 for m in range(4)]
+
+    # Build vertex → tet adjacency
+    vert_to_tets: dict[int, list[int]] = {j: [] for j in (wall_verts | cap_verts)}
+    for k in range(n_tets):
+        for v in tets[k]:
+            if v in vert_to_tets:
+                vert_to_tets[v].append(k)
+
+    def _signed_vol(c, tet_idx):
+        v0, v1, v2, v3 = tets[tet_idx]
+        d1 = c[v1] - c[v0]
+        d2 = c[v2] - c[v0]
+        d3 = c[v3] - c[v0]
+        return np.dot(d1, np.cross(d2, d3))
+
+    bbox_diag = np.linalg.norm(coords.max(axis=0) - coords.min(axis=0))
+    vol_threshold = 1e-6 * (bbox_diag / n_verts**(1/3))**3
+
+    def _all_tets_ok(c, vert_idx):
+        return all(_signed_vol(c, t) > vol_threshold for t in vert_to_tets[vert_idx])
+
+    # ---- Assign each vertex to a face and compute target positions ----
+    Rxy = np.sqrt(coords[:, 0]**2 + coords[:, 1]**2)
+    coords_new = coords.copy()
+    vert_face: dict[int, str] = {}
+
+    for j in wall_verts:
+        if Rxy[j] < 1e-14:
+            continue
+        face = "inner" if abs(Rxy[j] - r_inner) < abs(Rxy[j] - r_outer) else "outer"
+        vert_face[j] = face
+        R_target = r_inner if face == "inner" else r_outer
+        scale = R_target / Rxy[j]
+        coords_new[j, 0] = coords[j, 0] * scale
+        coords_new[j, 1] = coords[j, 1] * scale
+
+    if z_bottom is not None or z_top is not None:
+        for j in cap_verts:
+            if j in wall_verts:
+                continue
+            z_cur = coords[j, 2]
+            if z_bottom is not None and z_top is not None:
+                face = "bottom" if abs(z_cur - z_bottom) < abs(z_cur - z_top) else "top"
+            elif z_bottom is not None:
+                face = "bottom"
+            else:
+                face = "top"
+            vert_face[j] = face
+            coords_new[j, 2] = z_bottom if face == "bottom" else z_top
+
+    # ---- Per-face statistics ----
+    face_stats: dict[str, dict] = {
+        f: {"total": 0, "snapped": 0, "bisected": 0, "bisected_dists": []}
+        for f in ("inner", "outer", "bottom", "top")
+    }
+    for j, face in vert_face.items():
+        face_stats[face]["total"] += 1
+
+    # ---- Apply with bisection safety ----
+    n_snapped = 0
+    n_bisected = 0
+    for j in (wall_verts | cap_verts):
+        if np.allclose(coords[j], coords_new[j], atol=1e-14):
             continue
 
-        for R_target in (r_inner, r_outer):
-            dist = abs(Rxy - R_target)
-            if snap_tol < dist < hausd_tol:
-                scale = R_target / Rxy
-                lines[vert_start + j] = (
-                    f"{x * scale:.14e} {y * scale:.14e} {z:.14e} {ref}"
-                )
-                n_snapped += 1
-                break
+        face = vert_face.get(j)
+        old = coords[j].copy()
+        coords[j] = coords_new[j]
 
+        if _all_tets_ok(coords, j):
+            n_snapped += 1
+            if face:
+                face_stats[face]["snapped"] += 1
+        else:
+            disp = coords_new[j] - old
+            alpha_lo, alpha_hi = 0.0, 1.0
+            for _ in range(30):
+                alpha_mid = 0.5 * (alpha_lo + alpha_hi)
+                coords[j] = old + alpha_mid * disp
+                if _all_tets_ok(coords, j):
+                    alpha_lo = alpha_mid
+                else:
+                    alpha_hi = alpha_mid
+            coords[j] = old + alpha_lo * disp
+            n_snapped += 1
+            n_bisected += 1
+            if face:
+                face_stats[face]["snapped"] += 1
+                face_stats[face]["bisected"] += 1
+                if face == "inner":
+                    dist = abs(np.sqrt(coords[j, 0]**2 + coords[j, 1]**2) - r_inner)
+                elif face == "outer":
+                    dist = abs(np.sqrt(coords[j, 0]**2 + coords[j, 1]**2) - r_outer)
+                elif face == "bottom":
+                    dist = abs(coords[j, 2] - z_bottom)
+                else:
+                    dist = abs(coords[j, 2] - z_top)
+                face_stats[face]["bisected_dists"].append(dist)
+
+    # ---- Write back ----
+    for j in range(n_verts):
+        lines[vert_start + j] = (
+            f"{coords[j, 0]:.14e} {coords[j, 1]:.14e} "
+            f"{coords[j, 2]:.14e} {refs[j]}"
+        )
     mesh_path.write_text("\n".join(lines) + "\n")
+
+    # ---- Build result dict and print summary ----
+    result: dict[str, dict] = {}
+    for face, stats in face_stats.items():
+        dists = stats["bisected_dists"]
+        result[face] = {
+            "total":     stats["total"],
+            "snapped":   stats["snapped"],
+            "bisected":  stats["bisected"],
+            "mean_dist": float(np.mean(dists)) if dists else 0.0,
+            "std_dist":  float(np.std(dists))  if dists else 0.0,
+            "max_dist":  float(np.max(dists))  if dists else 0.0,
+        }
+
     print(
-        f"[snap] {mesh_path.name}: snapped {n_snapped}/{n_verts} vertices "
-        f"onto cylindrical walls (r_inner={r_inner}, r_outer={r_outer})"
+        f"[snap] {mesh_path.name}: snapped {n_snapped} vertices "
+        f"({n_bisected} needed bisection fallback)"
     )
-    return n_snapped
+    for face, s in result.items():
+        dist_str = (
+            f"  dist: mean={s['mean_dist']:.3e}  std={s['std_dist']:.3e}  max={s['max_dist']:.3e}"
+            if s["bisected"] > 0 else ""
+        )
+        print(
+            f"  [{face:6s}] total={s['total']:5d}  snapped={s['snapped']:5d}"
+            f"  bisected={s['bisected']:5d}{dist_str}"
+        )
+    return result
 
-
-# a bit overkill maybe just better to generate the first mesh in mmg
 def write_dolfinx_to_medit(msh, path: str) -> None:
     tdim = 3
     fdim = 2

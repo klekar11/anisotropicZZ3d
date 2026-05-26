@@ -1,5 +1,4 @@
 from typing import Tuple, Callable
-
 import numpy as np
 import ufl
 from dolfinx import fem

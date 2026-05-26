@@ -4,7 +4,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-RESULTS_DIR="../mmg_tests/zz_tok_nosurf"
+RESULTS_DIR="NZ_1d_diagnostic"
 # Output image names (saved inside RESULTS_DIR/)
 OUT1="tre_vs_nvertices.png"
 OUT2="vertices_vs_iteration.png"

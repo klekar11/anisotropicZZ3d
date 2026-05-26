@@ -8,14 +8,25 @@ root = Path(__file__).resolve().parents[1]
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
-from adaptive_algo import run_adaptive_poisson
-from problems import get_problem
+from adaptive_algo import run_adaptive_poisson, PPRConvergenceTracker
+from problems import get_problem, get_grad_exact
 from solver import solve_poisson_generic
+
+# Boundary-layer parameters for PPRConvergenceTracker, keyed by problem name.
+# layer_dir: coordinate index whose variation defines the layer;
+# layer_half_width: half-width of the region used to sample h_z.
+_PPR_LAYER_PARAMS = {
+    "1d":         dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.3),
+    "plan":       dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.05),
+    "sphere":     dict(layer_dir=0, layer_centre=0.5, layer_half_width=0.1),
+    "tok-sphere": dict(layer_dir=2, layer_centre=400.0, layer_half_width=40.0),
+    "tok-wall":   dict(layer_dir=0, layer_centre=500.0, layer_half_width=150.0),
+}
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Anisotropic adaptive Poisson solver")
-    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere"],
+    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere", "tok-wall"],
                    help="Problem type (default: 1d)")
     p.add_argument("--k",        type=int, default=1, choices=[1, 2],
                    help="FE degree and estimator: 1=ZZ, 2=Naga-Zhang (default: 1)")
@@ -46,10 +57,6 @@ def parse_args():
                    help="Exact inner cylindrical wall radius for snapping (default: 200.0)")
     p.add_argument("--snap-r-outer",    type=float, default=800.0, dest="snap_r_outer",
                    help="Exact outer cylindrical wall radius for snapping (default: 800.0)")
-    p.add_argument("--snap-hausd-tol",  type=float, default=10.0,  dest="snap_hausd_tol",
-                   help="Detection band half-width for snapping (default: 10.0)")
-    p.add_argument("--snap-snap-tol",   type=float, default=1e-1,  dest="snap_snap_tol",
-                   help="Skip vertices already within this distance of the exact radius (default: 0.1)")
     return p.parse_args()
 
 
@@ -89,8 +96,6 @@ def main():
         if args.snap_walls:
             fh.write(f"snap_r_inner:      {args.snap_r_inner}\n")
             fh.write(f"snap_r_outer:      {args.snap_r_outer}\n")
-            fh.write(f"snap_hausd_tol:    {args.snap_hausd_tol}\n")
-            fh.write(f"snap_snap_tol:     {args.snap_snap_tol}\n")
     print(f"Run info saved → {run_info_path}")
 
     f_factory, g_np, u_exact = get_problem(args.problem)
@@ -108,15 +113,24 @@ def main():
     tok_snap = None
     if args.snap_walls:
         tok_snap = {
-            "r_inner":   args.snap_r_inner,
-            "r_outer":   args.snap_r_outer,
-            "hausd_tol": args.snap_hausd_tol,
-            "snap_tol":  args.snap_snap_tol,
+            "r_inner": args.snap_r_inner,
+            "r_outer": args.snap_r_outer,
         }
 
     prev_mesh_file    = args.mesh   # None → generate from scratch on first TOL
     all_iter_metrics  = {}
     all_final_metrics = {}
+
+    # PPR convergence tracker — only active for k=2 (Naga-Zhang estimator)
+    ppr_tracker = None
+    if args.k == 2:
+        from nz_eta_estimatorP2 import Gh as _Gh
+        _grad_ex = get_grad_exact(args.problem)
+        _layer_kw = _PPR_LAYER_PARAMS.get(
+            args.problem,
+            dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.3),
+        )
+        ppr_tracker = PPRConvergenceTracker(**_layer_kw)
 
     for tol in tol_values:
         print(f"\n{'#' * 70}")
@@ -125,7 +139,7 @@ def main():
 
         tol_dir = results_dir / f"tol_{tol}"
 
-        _, _, _, final_metrics, iter_metrics = run_adaptive_poisson(
+        msh, u_h, h_p, final_metrics, iter_metrics = run_adaptive_poisson(
             results_dir       = tol_dir,
             solver            = make_solver,
             u_numpy           = u_exact,
@@ -147,6 +161,9 @@ def main():
 
         all_iter_metrics[tol]  = iter_metrics
         all_final_metrics[tol] = final_metrics
+
+        if ppr_tracker is not None:
+            ppr_tracker.record(tol, msh, u_h, _Gh, _grad_ex, h_p=h_p)
 
         print(f"\nFinal metrics for TOL={tol}:")
         for key, value in final_metrics.items():
@@ -177,6 +194,10 @@ def main():
                 fh.write(f"  {key}: {value}\n")
             fh.write("\n")
     print(f"Final metrics summary saved → {txt_path}")
+
+    if ppr_tracker is not None:
+        ppr_tracker.print_table()
+        ppr_tracker.plot(str(results_dir / "ppr_convergence.pdf"))
 
 
 if __name__ == "__main__":

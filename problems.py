@@ -2,11 +2,15 @@
 import numpy as np
 import ufl
 
-EPSILON_1D     = 0.01
+EPSILON_1D     = 0.1
 EPSILON_SPHERE = 0.05
 R_SPHERE       = 0.5
 EPSILON_PLAN   = 0.01
-
+# Tokamak wall-adaptation problem parameters (distances in mm)
+R_IN_WALL  = 200.0                          # inner cylindrical wall radius
+R_OUT_WALL = 800.0                          # outer cylindrical wall radius
+A_WALL     = 200.0                          # cosh amplitude / length scale
+RC_WALL    = (R_IN_WALL + R_OUT_WALL) / 2  # radial midpoint = 500 mm
 # TCV tokamak torus parameters (distances in mm)
 R0_TOK      = 640.0   # major radius of the torus axis
 Z0_TOK      = 400.0   # vertical centre of the cross-section
@@ -31,7 +35,9 @@ def get_problem(name: str) -> tuple:
         return _problem_plan()
     if name == "tok-sphere":
         return _problem_tok_sphere()
-    raise ValueError(f"Unknown problem '{name}'. Available: '1d', 'sphere', 'plan', 'tok-sphere'.")
+    if name == "tok-wall":
+        return _problem_tok_wall()
+    raise ValueError(f"Unknown problem '{name}'. Available: '1d', 'sphere', 'plan', 'tok-sphere', 'tok-wall'.")
 
 
 def _problem_1d(epsilon: float = EPSILON_1D):
@@ -132,6 +138,149 @@ def _problem_tok_sphere(
         )
 
     return f_factory, g, g
+
+def _problem_tok_wall(
+    Rc: float = RC_WALL,
+    a:  float = A_WALL,
+):
+    """Axisymmetric cosh wall-adaptation problem inside a tokamak domain.
+
+    Exact solution (cylindrical coordinates, no Z or phi dependence):
+        u(x,y,z) = cosh(xi^4) / a,     xi = (R_xy - Rc) / a
+    where R_xy = sqrt(x^2 + y^2) is the cylindrical radius.
+
+    The solution is minimal (= 1/a) on the mid-surface R_xy = Rc and grows
+    symmetrically toward both walls, making it a direct test of anisotropic
+    refinement near the inner (R=200 mm) and outer (R=800 mm) cylindrical walls.
+
+    RHS  f = -Delta u  in 3D, derived analytically via the cylindrical Laplacian
+    for an axisymmetric function (no Z, no phi dependence):
+
+        Delta u = d2u/dR2 + (1/R) * du/dR
+
+        du/dR   =  4 * xi^3 * sinh(xi^4) / a^2
+        d2u/dR2 = (12 * xi^2 * sinh(xi^4) + 16 * xi^6 * cosh(xi^4)) / a^3
+
+        f = -d2u/dR2 - (1/R_xy) * du/dR
+
+    No UFL conditional is needed: cosh/sinh(xi^4) are smooth everywhere and
+    FFCX compiles the expression without quadrature explosion.
+    """
+    def f_factory(msh):
+        x   = ufl.SpatialCoordinate(msh)
+        Rxy = ufl.sqrt(x[0]**2 + x[1]**2 + 1e-16)  # regularised at R=0
+        xi  = (Rxy - Rc) / a
+        xi4 = xi**4
+
+        d2u_dR2    = (12.0 * xi**2 * ufl.sinh(xi4)
+                      + 16.0 * xi**6 * ufl.cosh(xi4)) / a**3
+        inv_R_du_dR = 4.0 * xi**3 * ufl.sinh(xi4) / (a**2 * Rxy)
+
+        return -(d2u_dR2 + inv_R_du_dR)
+
+    def g(x: np.ndarray) -> np.ndarray:
+        Rxy = np.sqrt(x[0]**2 + x[1]**2)
+        xi  = (Rxy - Rc) / a
+        return np.cosh(xi**4) / a
+
+    return f_factory, g, g
+def get_grad_exact(name: str):
+    """Return exact gradient callable for the named problem.
+
+    Signature: ``grad_u(x)`` where ``x`` has shape ``(3, n_dofs)``
+    (FEniCSx vector-interpolation convention) and the return has
+    shape ``(3, n_dofs)``.  Suitable for ``fem.Function.interpolate``
+    on a ``("Lagrange", degree, (3,))`` vector space.
+    """
+    if name == "1d":
+        return _grad_1d()
+    if name == "sphere":
+        return _grad_sphere()
+    if name == "plan":
+        return _grad_plan()
+    if name == "tok-sphere":
+        return _grad_tok_sphere()
+    if name == "tok-wall":
+        return _grad_tok_wall()
+    raise ValueError(f"Unknown problem '{name}'.")
+
+
+def _grad_1d(epsilon: float = EPSILON_1D):
+    def grad_u(x):  # x: (3, n) → (3, n)
+        t = np.tanh(x[0] / epsilon)
+        out = np.zeros_like(x)
+        out[0] = (1.0 - t**2) / epsilon
+        return out
+    return grad_u
+
+
+def _grad_sphere(R: float = R_SPHERE, epsilon: float = EPSILON_SPHERE):
+    def grad_u(x):  # x: (3, n) → (3, n)
+        r = np.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+        s = R - r
+        h_prime = np.where(
+            np.abs(s) < epsilon,
+            (1.0 + np.cos(np.pi * s / epsilon)) / (2.0 * epsilon),
+            0.0,
+        )
+        r_safe = np.where(r < 1e-14, 1.0, r)
+        out = np.zeros_like(x)
+        out[0] = h_prime * (-x[0] / r_safe)
+        out[1] = h_prime * (-x[1] / r_safe)
+        out[2] = h_prime * (-x[2] / r_safe)
+        return out
+    return grad_u
+
+
+def _grad_tok_sphere(
+    Rc: float = Rc_TOK,
+    Zc: float = Zc_TOK,
+    r_shell: float = r_shell_TOK,
+    epsilon: float = EPSILON_TOK,
+):
+    def grad_u(x):  # x: (3, n) → (3, n)
+        Rxy = np.sqrt(x[0]**2 + x[1]**2)
+        d = np.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2)
+        s = r_shell - d
+        h_prime = np.where(
+            np.abs(s) < epsilon,
+            (1.0 + np.cos(np.pi * s / epsilon)) / (2.0 * epsilon),
+            0.0,
+        )
+        d_safe = np.where(d < 1e-14, 1.0, d)
+        Rxy_safe = np.where(Rxy < 1e-14, 1.0, Rxy)
+        out = np.zeros_like(x)
+        out[0] = h_prime * (-(Rxy - Rc) / d_safe * x[0] / Rxy_safe)
+        out[1] = h_prime * (-(Rxy - Rc) / d_safe * x[1] / Rxy_safe)
+        out[2] = h_prime * (-(x[2] - Zc) / d_safe)
+        return out
+    return grad_u
+
+
+def _grad_tok_wall(Rc: float = RC_WALL, a: float = A_WALL):
+    def grad_u(x):  # x: (3, n) → (3, n)
+        Rxy = np.sqrt(x[0]**2 + x[1]**2)
+        xi = (Rxy - Rc) / a
+        du_dR = 4.0 * xi**3 * np.sinh(xi**4) / a**2
+        Rxy_safe = np.where(Rxy < 1e-14, 1.0, Rxy)
+        out = np.zeros_like(x)
+        out[0] = du_dR * x[0] / Rxy_safe
+        out[1] = du_dR * x[1] / Rxy_safe
+        return out
+    return grad_u
+
+
+def _grad_plan(epsilon: float = EPSILON_PLAN):
+    sqrt2 = np.sqrt(2.0)
+    def grad_u(x):  # x: (3, n) → (3, n)
+        d = (x[0] + x[1]) / (epsilon * sqrt2)
+        t = np.tanh(d)
+        coeff = (1.0 - t**2) / (epsilon * sqrt2)
+        out = np.zeros_like(x)
+        out[0] = coeff
+        out[1] = coeff
+        return out
+    return grad_u
 
 
 def _problem_plan(epsilon: float = EPSILON_PLAN):
