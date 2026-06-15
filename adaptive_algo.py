@@ -38,19 +38,18 @@ class PPRConvergenceTracker:
     """Track PPR gradient-recovery convergence across multiple adaptive runs.
 
     After each completed adaptive run (at a given tolerance), call
-    :meth:`record` to store three L² gradient errors:
+    :meth:`record` to store six L² gradient errors:
 
-      A = ||∇u_h − ∇u||          true FE gradient error
-      B = ||∇u_h − G_nz||        PPR–FE residual
-      C = ||G_nz − ∇u||          PPR recovery error (vs. exact)
+      A = ||∇u_h − ∇u||              true FE gradient error
+      B = ||∇u_h − G_h(u_h)||        PPR–FE residual
+      C = ||G_h(u_h) − ∇u||          PPR recovery error (vs. exact)
+      D = ||∇u − G_h(I²u)||          recovery error of the P2 interpolant
+      E = ||G_h(u_h) − G_h(I²u)||    PPR sensitivity (PDE vs interpolation error)
+      F = ||∇(I²u) − ∇u_h||          supercloseness
 
     Expected rates (P2, w.r.t. h_z in the boundary layer):
       A ~ O(h²),  B ~ O(h²),  C ~ O(h³) if superconvergent.
-
-    The representative mesh size h_z is the median of ``h_p[:, 2]`` (the
-    z-component of the anisotropic mesh-size array) over all vertices
-    inside the boundary layer, defined by
-    ``|x[layer_dir] − layer_centre| < layer_half_width``.
+      D ~ O(h³),  E ~ o(h²),  F ~ O(h³)  (supercloseness).
 
     Parameters
     ----------
@@ -79,9 +78,11 @@ class PPRConvergenceTracker:
         tol: float,
         msh,
         u_h,
+        u_numpy,
         Gh_func,
-        grad_u_exact,
+        grad_u_exact_factory,
         h_p: "np.ndarray | None" = None,
+        interior_box: "tuple[float, float] | None" = None,
     ) -> None:
         """Record one run's errors and representative h_z.
 
@@ -92,25 +93,34 @@ class PPRConvergenceTracker:
         msh :
             Converged DOLFINx mesh.
         u_h :
-            Converged FEM solution (CG1 or CG2).
+            Converged FEM solution (P2).
+        u_numpy :
+            Exact solution as numpy callback ``u_numpy(x) -> array`` (scalar).
+            Used to build the P2 interpolant I²u.
         Gh_func :
             Callable ``Gh_func(u_h) -> fem.Function`` returning the PPR
             recovered gradient (e.g. ``nz_eta_estimatorP2.Gh``).
-        grad_u_exact :
-            Callable compatible with ``fem.Function.interpolate`` on a
-            vector space: ``x`` shape ``(gdim, n_dofs)`` → ``(gdim, n_dofs)``.
+        grad_u_exact_factory :
+            Callable ``grad_u_exact_factory(msh) -> UFL vector expression``
+            for the exact gradient ∇u.
         h_p :
             Optional ``(n_vertices, tdim)`` array from :func:`adapt_h`.
             When provided ``h_p[:, 2]`` is used for h_z; otherwise h_z
             is estimated from each in-layer cell's z-vertex range.
+        interior_box :
+            Optional ``(lo, hi)`` scalar pair.  When provided, a second set
+            of A–F errors is computed restricted to cells whose centroid
+            satisfies ``lo <= x[d] <= hi`` for all dimensions d.  Use this
+            to separate boundary-patch effects from bulk convergence.
+            E.g. ``(-0.8, 0.8)`` on the [-1,1]^3 domain excludes the outer
+            shell.  Set to ``None`` (default) to disable.
         """
         from dolfinx import fem as _fem
         import ufl as _ufl
         from dolfinx.fem import form as _form
 
-        gdim = msh.geometry.dim
         tdim = msh.topology.dim
-        coords = msh.geometry.x          # (n_vertices, gdim)
+        coords = msh.geometry.x
 
         # ---- representative h_z in the boundary layer ----------------
         vert_in_layer = (
@@ -140,39 +150,82 @@ class PPRConvergenceTracker:
             return
         h_layer = float(np.median(h_z_vals))
 
-        # ---- PPR recovered gradient (P2 vector fem.Function) ---------
-        G_nz = Gh_func(u_h)
+        # ---- Build I²u: P2 interpolant of the exact solution ---------
+        V = u_h.function_space
+        I2u = _fem.Function(V)
+        I2u.interpolate(u_numpy)
 
-        # ---- exact gradient in a high-degree CG vector space ---------
-        deg_ex = u_h.function_space.ufl_element().degree + 2
-        V_grad = _fem.functionspace(msh, ("Lagrange", deg_ex, (gdim,)))
-        grad_ex_fn = _fem.Function(V_grad, name="grad_u_exact")
-        grad_ex_fn.interpolate(grad_u_exact)
+        # ---- Exact gradient as UFL expression ------------------------
+        grad_u_ex = grad_u_exact_factory(msh)
 
-        # ---- A = ||∇u_h − ∇u|| (true FE gradient error) -------------
-        e_A = _ufl.grad(u_h) - grad_ex_fn
-        A = float(np.sqrt(
-            _fem.assemble_scalar(_form(_ufl.inner(e_A, e_A) * _ufl.dx))
-        ))
+        # ---- PPR recovered gradients ---------------------------------
+        G_nz   = Gh_func(u_h)   # G_h(u_h)  — recovery of FE solution
+        Gh_I2u = Gh_func(I2u)   # G_h(I²u)  — recovery of interpolant
 
-        # ---- B = ||∇u_h − G_nz|| (PPR–FE residual) ------------------
-        e_B = _ufl.grad(u_h) - G_nz
-        B = float(np.sqrt(
-            _fem.assemble_scalar(_form(_ufl.inner(e_B, e_B) * _ufl.dx))
-        ))
+        def _l2(expr):
+            val = _fem.assemble_scalar(_form(_ufl.inner(expr, expr) * _ufl.dx))
+            return float(np.sqrt(val))
 
-        # ---- C = ||G_nz − ∇u|| (PPR recovery vs. exact) -------------
-        e_C = G_nz - grad_ex_fn
-        C = float(np.sqrt(
-            _fem.assemble_scalar(_form(_ufl.inner(e_C, e_C) * _ufl.dx))
-        ))
+        # ---- A, B, C (original three) --------------------------------
+        A = _l2(_ufl.grad(u_h) - grad_u_ex)          # ||∇u_h − ∇u||
+        B = _l2(_ufl.grad(u_h) - G_nz)               # ||∇u_h − G_h(u_h)||
+        C = _l2(G_nz - grad_u_ex)                    # ||G_h(u_h) − ∇u||
 
-        entry = {"tol": tol, "h_layer": h_layer, "A": A, "B": B, "C": C}
+        # ---- D, E, F (interpolant decomposition) --------------------
+        D = _l2(grad_u_ex - Gh_I2u)                  # ||∇u − G_h(I²u)||
+        E = _l2(G_nz - Gh_I2u)                       # ||G_h(u_h) − G_h(I²u)||
+        F = _l2(_ufl.grad(I2u) - _ufl.grad(u_h))    # ||∇(I²u) − ∇u_h||
+
+        entry = {"tol": tol, "h_layer": h_layer,
+                 "A": A, "B": B, "C": C, "D": D, "E": E, "F": F}
         self._records.append(entry)
         print(
             f"  [PPRTracker] tol={tol:.3e}  h_z={h_layer:.3e}"
             f"  A={A:.3e}  B={B:.3e}  C={C:.3e}"
         )
+        print(
+            f"  [PPRTracker]  D={D:.3e}  E={E:.3e}  F={F:.3e}"
+        )
+
+        # ── interior-box errors (delete this block to restore original) ──
+        if interior_box is not None:
+            lo, hi = interior_box
+            msh.topology.create_connectivity(tdim, 0)
+            _ctv  = msh.topology.connectivity(tdim, 0).array.reshape(-1, tdim + 1)
+            _bary = coords[_ctv].mean(axis=1)          # (n_cells, gdim)
+            _mask = np.all((_bary >= lo) & (_bary <= hi), axis=1)
+            _int_cells = np.where(_mask)[0].astype(np.int32)
+            import dolfinx.mesh as _dmesh
+            _ct = _dmesh.meshtags(msh, tdim, _int_cells,
+                                  np.ones(len(_int_cells), dtype=np.int32))
+            _dx_int = _ufl.Measure("dx", domain=msh, subdomain_data=_ct)(1)
+
+            def _l2_int(expr):
+                val = _fem.assemble_scalar(_form(_ufl.inner(expr, expr) * _dx_int))
+                return float(np.sqrt(val))
+
+            Ai = _l2_int(_ufl.grad(u_h) - grad_u_ex)
+            Bi = _l2_int(_ufl.grad(u_h) - G_nz)
+            Ci = _l2_int(G_nz - grad_u_ex)
+            Di = _l2_int(grad_u_ex - Gh_I2u)
+            Ei = _l2_int(G_nz - Gh_I2u)
+            Fi = _l2_int(_ufl.grad(I2u) - _ufl.grad(u_h))
+
+            entry.update({"A_int": Ai, "B_int": Bi, "C_int": Ci,
+                          "D_int": Di, "E_int": Ei, "F_int": Fi})
+            n_int = int(len(_int_cells))
+            n_tot = int(msh.topology.index_map(tdim).size_local)
+            print(
+                f"  [PPRTracker/int] box=[{lo},{hi}]^3  "
+                f"{n_int}/{n_tot} cells"
+            )
+            print(
+                f"  [PPRTracker/int]  A={Ai:.3e}  B={Bi:.3e}  C={Ci:.3e}"
+            )
+            print(
+                f"  [PPRTracker/int]  D={Di:.3e}  E={Ei:.3e}  F={Fi:.3e}"
+            )
+        # ─────────────────────────────────────────────────────────────────
 
     # ------------------------------------------------------------------
     def _sorted(self) -> list[dict]:
@@ -181,31 +234,52 @@ class PPRConvergenceTracker:
     def print_table(self) -> None:
         """Print a convergence table sorted by ascending h_z."""
         recs = self._sorted()
-        header = (
-            f"{'tol':>10}  {'h_z':>10}  {'A':>10}  {'B':>10}  {'C':>10}"
-            f"  {'rate_A':>7}  {'rate_B':>7}  {'rate_C':>7}"
-        )
-        sep = "─" * len(header)
-        print("\n" + header)
-        print(sep)
-        for k, r in enumerate(recs):
-            if k == 0:
-                rate_str = f"{'—':>7}  {'—':>7}  {'—':>7}"
-            else:
-                prev = recs[k - 1]
-                log_h = np.log(r["h_layer"] / prev["h_layer"])
-                ra = np.log(r["A"] / prev["A"]) / log_h
-                rb = np.log(r["B"] / prev["B"]) / log_h
-                rc = np.log(r["C"] / prev["C"]) / log_h
-                rate_str = f"{ra:7.2f}  {rb:7.2f}  {rc:7.2f}"
-            print(
-                f"  {r['tol']:>8.3e}  {r['h_layer']:>10.3e}"
-                f"  {r['A']:>10.3e}  {r['B']:>10.3e}  {r['C']:>10.3e}"
-                f"  {rate_str}"
+
+        def _print_block(label, keys):
+            qs = list(keys)
+            header = (
+                f"{'tol':>10}  {'h_z':>10}  "
+                + "  ".join(f"{q:>10}" for q in qs)
+                + "  "
+                + "  ".join(f"{'r'+q:>6}" for q in qs)
             )
+            sep = "─" * len(header)
+            print(f"\n{label}")
+            print(header)
+            print(sep)
+            for k, r in enumerate(recs):
+                if k == 0 or any(r.get(q) is None for q in qs):
+                    rate_str = "  ".join(f"{'—':>6}" for _ in qs)
+                else:
+                    prev = recs[k - 1]
+                    log_h = np.log(r["h_layer"] / prev["h_layer"])
+                    rates = [
+                        np.log(r[q] / prev[q]) / log_h
+                        for q in qs
+                    ]
+                    rate_str = "  ".join(f"{s:6.2f}" for s in rates)
+                vals_str = "  ".join(f"{r.get(q, float('nan')):>10.3e}" for q in qs)
+                print(
+                    f"  {r['tol']:>8.3e}  {r['h_layer']:>10.3e}"
+                    f"  {vals_str}  {rate_str}"
+                )
+
+        _print_block("Full domain", ("A", "B", "C", "D", "E", "F"))
+
+        # ── interior-box table (delete this block to restore original) ───
+        if recs and "A_int" in recs[0]:
+            _print_block("Interior box only",
+                         ("A_int", "B_int", "C_int", "D_int", "E_int", "F_int"))
+        # ─────────────────────────────────────────────────────────────────
 
     def plot(self, filename: str = "ppr_convergence.pdf") -> None:
-        """Save a log–log convergence plot to *filename*."""
+        """Save three log–log convergence plots derived from *filename*.
+
+        Generates ``<stem>_ABC``, ``<stem>_DEF``, and ``<stem>_all``
+        as both PDF and PNG.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         recs = self._sorted()
@@ -214,43 +288,233 @@ class PPRConvergenceTracker:
             return
 
         h = np.array([r["h_layer"] for r in recs])
-        A = np.array([r["A"] for r in recs])
-        B = np.array([r["B"] for r in recs])
-        C = np.array([r["C"] for r in recs])
 
-        fig, ax = plt.subplots(figsize=(6, 5))
-        ax.loglog(h, A, "b-o", label=r"$A=\|\nabla u_h-\nabla u\|$")
-        ax.loglog(h, B, "r-s", label=r"$B=\|\nabla u_h-G_{nz}\|$")
-        ax.loglog(h, C, "g-^", label=r"$C=\|G_{nz}-\nabla u\|$")
+        _fields = {
+            "A": {"label": r"$A=\|\nabla u_h-\nabla u\|$",
+                  "color": "#1f77b4", "marker": "o", "ls": "-"},
+            "B": {"label": r"$B=\|\nabla u_h-G_h u_h\|$",
+                  "color": "#ff7f0e", "marker": "s", "ls": "-"},
+            "C": {"label": r"$C=\|G_h u_h-\nabla u\|$",
+                  "color": "#2ca02c", "marker": "^", "ls": "-"},
+            "D": {"label": r"$D=\|\nabla u-G_h(I^2 u)\|$",
+                  "color": "#d62728", "marker": "D", "ls": "--"},
+            "E": {"label": r"$E=\|G_h u_h-G_h(I^2 u)\|$",
+                  "color": "#9467bd", "marker": "v", "ls": "--"},
+            "F": {"label": r"$F=\|\nabla(I^2 u)-\nabla u_h\|$",
+                  "color": "#8c564b", "marker": "P", "ls": "--"},
+        }
+        _yoff = {"A": 1.4, "B": 0.6, "C": 1.4, "D": 0.6, "E": 1.4, "F": 0.6}
 
-        # Reference slopes — only drawn when there are at least 2 points
-        if len(recs) >= 2:
-            i_mid = len(recs) // 2
-            h0 = h[i_mid]
-            ax.loglog(
-                h, A[i_mid] * (h / h0) ** 2,
-                "b--", alpha=0.45, lw=1.2, label=r"$O(h^2)$",
-            )
-            ax.loglog(
-                h, C[i_mid] * (h / h0) ** 3,
-                "g--", alpha=0.45, lw=1.2, label=r"$O(h^3)$",
-            )
-
-        ax.set_xlabel(r"$h_z$ (median in boundary layer)")
-        ax.set_ylabel(r"$L^2$ gradient error")
-        ax.set_title("PPR gradient-recovery convergence")
-        ax.legend(fontsize=8, loc="upper left")
-        ax.grid(True, which="both", alpha=0.3)
-        fig.tight_layout()
+        def _make_fig(subset, title):
+            fig, ax = plt.subplots(figsize=(8, 6))
+            for name in subset:
+                info = _fields[name]
+                vals = np.array([r[name] for r in recs])
+                if np.all(vals > 0):
+                    ax.loglog(h, vals,
+                              marker=info["marker"], linestyle=info["ls"],
+                              color=info["color"], linewidth=2, markersize=7,
+                              label=info["label"])
+            if len(recs) >= 2:
+                h_ref = np.array([h.min(), h.max()])
+                A_fine = float(recs[-1]["A"])
+                ax.loglog(h_ref, (A_fine / h[-1]**2) * h_ref**2,
+                          "--", color="gray", lw=1, alpha=0.5, label=r"$O(h^2)$")
+                D_fine = float(recs[-1]["D"])
+                if D_fine > 0:
+                    ax.loglog(h_ref, (D_fine / h[-1]**3) * h_ref**3,
+                              ":", color="gray", lw=1, alpha=0.5, label=r"$O(h^3)$")
+                for name in subset:
+                    vals = np.array([r[name] for r in recs])
+                    if not np.all(vals > 0):
+                        continue
+                    rate = np.log(vals[-1] / vals[-2]) / np.log(h[-1] / h[-2])
+                    xmid = np.sqrt(h[-1] * h[-2])
+                    ymid = np.sqrt(vals[-1] * vals[-2])
+                    ax.annotate(f"{rate:.2f}", xy=(xmid, ymid * _yoff[name]),
+                                fontsize=9, color=_fields[name]["color"],
+                                fontweight="bold", ha="center")
+            ax.set_xlabel(r"$h_z$ (median in boundary layer)", fontsize=13)
+            ax.set_ylabel(r"$L^2$ gradient error", fontsize=13)
+            ax.set_title(title, fontsize=14)
+            ncol = 1 if len(subset) <= 3 else 2
+            ax.legend(fontsize=9, loc="upper left", ncol=ncol)
+            ax.grid(True, which="both", alpha=0.3)
+            fig.tight_layout()
+            return fig
 
         out = Path(filename).resolve()
-        fig.savefig(str(out), dpi=150)
-        # Also save a PNG alongside the PDF for quick viewing
-        png_out = out.with_suffix(".png")
-        fig.savefig(str(png_out), dpi=150)
-        plt.close(fig)
-        print(f"  [PPRTracker] Convergence plot saved → {out}")
-        print(f"  [PPRTracker]                    PNG → {png_out}")
+        parent = out.parent
+        stem = out.stem
+
+        for subset, title, suffix in [
+            (["A", "B", "C"],
+             "PPR convergence: FE errors (P2)",
+             "_ABC"),
+            (["D", "E", "F"],
+             "PPR convergence: interpolant decomposition (P2)",
+             "_DEF"),
+            (list(_fields.keys()),
+             "PPR gradient-recovery convergence (P2)",
+             "_all"),
+        ]:
+            fig = _make_fig(subset, title)
+            for ext in (".pdf", ".png"):
+                p = parent / (stem + suffix + ext)
+                fig.savefig(str(p), dpi=150, bbox_inches="tight")
+                print(f"  [PPRTracker] Saved → {p}")
+            plt.close(fig)
+
+        # ── interior-box plots (delete this block to restore original) ───
+        if recs and "A_int" in recs[0]:
+            # Remap _fields keys to their _int counterparts for _make_fig
+            _fields_int = {
+                q + "_int": {**info, "label": info["label"].replace("$", "$") + " (int)"}
+                for q, info in _fields.items()
+            }
+            _yoff_int = {q + "_int": v for q, v in _yoff.items()}
+
+            def _make_fig_int(subset_int, title):
+                fig, ax = plt.subplots(figsize=(8, 6))
+                for key in subset_int:
+                    base = key.replace("_int", "")
+                    info = _fields[base]
+                    vals = np.array([r.get(key, float("nan")) for r in recs])
+                    if np.all(np.isfinite(vals)) and np.all(vals > 0):
+                        ax.loglog(h, vals,
+                                  marker=info["marker"], linestyle=info["ls"],
+                                  color=info["color"], linewidth=2, markersize=7,
+                                  label=info["label"] + " (int)")
+                if len(recs) >= 2:
+                    h_ref = np.array([h.min(), h.max()])
+                    A_fine = float(recs[-1].get("A_int", recs[-1]["A"]))
+                    ax.loglog(h_ref, (A_fine / h[-1]**2) * h_ref**2,
+                              "--", color="gray", lw=1, alpha=0.5, label=r"$O(h^2)$")
+                    D_fine = float(recs[-1].get("D_int", recs[-1]["D"]))
+                    if D_fine > 0:
+                        ax.loglog(h_ref, (D_fine / h[-1]**3) * h_ref**3,
+                                  ":", color="gray", lw=1, alpha=0.5, label=r"$O(h^3)$")
+                    for key in subset_int:
+                        base = key.replace("_int", "")
+                        vals = np.array([r.get(key, float("nan")) for r in recs])
+                        if not (np.all(np.isfinite(vals)) and np.all(vals > 0)):
+                            continue
+                        rate = np.log(vals[-1] / vals[-2]) / np.log(h[-1] / h[-2])
+                        xmid = np.sqrt(h[-1] * h[-2])
+                        ymid = np.sqrt(vals[-1] * vals[-2])
+                        ax.annotate(f"{rate:.2f}",
+                                    xy=(xmid, ymid * _yoff[base]),
+                                    fontsize=9, color=_fields[base]["color"],
+                                    fontweight="bold", ha="center")
+                ax.set_xlabel(r"$h_z$ (median in boundary layer)", fontsize=13)
+                ax.set_ylabel(r"$L^2$ gradient error", fontsize=13)
+                ax.set_title(title, fontsize=14)
+                ncol = 1 if len(subset_int) <= 3 else 2
+                ax.legend(fontsize=9, loc="upper left", ncol=ncol)
+                ax.grid(True, which="both", alpha=0.3)
+                fig.tight_layout()
+                return fig
+
+            for subset_int, title, suffix in [
+                (["A_int", "B_int", "C_int"],
+                 "PPR convergence: FE errors — interior only (P2)",
+                 "_ABC_int"),
+                (["D_int", "E_int", "F_int"],
+                 "PPR convergence: interpolant decomp. — interior only (P2)",
+                 "_DEF_int"),
+                (["A_int", "B_int", "C_int", "D_int", "E_int", "F_int"],
+                 "PPR convergence: all errors — interior only (P2)",
+                 "_all_int"),
+            ]:
+                fig = _make_fig_int(subset_int, title)
+                for ext in (".pdf", ".png"):
+                    p = parent / (stem + suffix + ext)
+                    fig.savefig(str(p), dpi=150, bbox_inches="tight")
+                    print(f"  [PPRTracker] Saved → {p}")
+                plt.close(fig)
+        # ─────────────────────────────────────────────────────────────────
+
+
+def _save_patch_cond_hist(u_h, msh, loop_idx, out_dir, cond_params):
+    """Compute PPR patch condition numbers and save a stacked histogram.
+
+    Vertices are split into three categories coloured in each bar:
+      - red:   boundary (∂Ω)
+      - blue:  layer interior (|x[layer_dir] - layer_centre| < layer_half_width)
+      - green: other interior
+
+    Parameters
+    ----------
+    cond_params : dict with keys layer_dir, layer_centre, layer_half_width
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from nz_eta_estimatorP2 import Gh_with_cond
+    from nz_mesh_helpers import find_boundary
+
+    _, cond_arr = Gh_with_cond(u_h)
+
+    coords = msh.geometry.x
+    n_verts = len(cond_arr)
+    B = find_boundary(msh)                      # bool[n_vertices], True = on ∂Ω
+
+    ld = cond_params["layer_dir"]
+    lc = cond_params["layer_centre"]
+    lw = cond_params["layer_half_width"]
+    in_layer = np.abs(coords[:n_verts, ld] - lc) < lw
+
+    # 0 = boundary (takes priority), 1 = layer interior, 2 = other interior
+    cats = np.full(n_verts, 2, dtype=np.int32)
+    cats[in_layer & ~B] = 1
+    cats[B] = 0
+
+    log_cond = np.log10(np.maximum(cond_arr, 1.0))
+    cond_max = float(log_cond.max())
+    bins = np.linspace(0.0, max(cond_max + 0.5, 8.0), 60)
+
+    n_bnd   = int(np.sum(cats == 0))
+    n_layer = int(np.sum(cats == 1))
+    n_other = int(np.sum(cats == 2))
+    med  = float(np.median(log_cond))
+    p95  = float(np.percentile(log_cond, 95))
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(
+        [log_cond[cats == 0], log_cond[cats == 1], log_cond[cats == 2]],
+        bins=bins, stacked=True,
+        color=["#d62728", "#1f77b4", "#2ca02c"],
+        label=[
+            f"boundary ({n_bnd} vertices)",
+            f"layer |x[{ld}]−{lc:.2g}|<{lw:.2g} ({n_layer} vertices)",
+            f"other interior ({n_other} vertices)",
+        ],
+        edgecolor="none", alpha=0.85,
+    )
+    ax.axvline(med, color="black", ls="--", lw=1.5,
+               label=f"median κ = {10**med:.2e}")
+    ax.axvline(p95, color="black", ls=":",  lw=1.5,
+               label=f"95th pct κ = {10**p95:.2e}")
+    ax.set_xlabel(r"$\log_{10}\,\kappa(A^T A)$", fontsize=13)
+    ax.set_ylabel("Number of vertices", fontsize=13)
+    ax.set_title(
+        f"PPR patch condition numbers — loop {loop_idx + 1}  "
+        f"(n={n_verts} vertices)",
+        fontsize=13,
+    )
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    hist_dir = Path(out_dir) / "patch_cond_hists"
+    hist_dir.mkdir(exist_ok=True)
+    p = hist_dir / f"patch_cond_hist_loop{loop_idx:03d}.png"
+    fig.savefig(str(p), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(
+        f"  [cond_hist] loop {loop_idx + 1}  "
+        f"median κ={10**med:.2e}  p95 κ={10**p95:.2e}  → patch_cond_hists/{p.name}"
+    )
 
 
 def run_adaptive_poisson(
@@ -264,12 +528,13 @@ def run_adaptive_poisson(
     tol: float = 0.5,
     alpha: float = 0.25,
     correction_factor: float = 1.5,
-    degree_raise: int = 2,
+    degree_raise: int = 4,
     mmg3d_exe: str = "/usr/local/bin/mmg3d_O3",
     initial_mesh_file: Path | str | None = None,
     k: int = 1,
     mmg_extra_args: list | None = None,
     tok_snap: dict | None = None,
+    patch_cond_diag: "dict | None" = None,
 ) -> tuple:
     """Run the anisotropic adaptive Poisson algorithm (Table 1.6).
 
@@ -433,9 +698,9 @@ def run_adaptive_poisson(
             u_h, u_numpy, degree_raise
         )
         tre_iter = float(norm_grad_e / norm_grad_uh) if norm_grad_uh > 1e-30 else float('nan')
-        print(f"  TRE={tre_iter:.6e}  n_vertices={n_vertices_iter}")
-        if not np.isfinite(tre_iter):
-            print("  WARNING: TRE is NaN/inf — solution is degenerate, stopping loop.")
+        print(f"  TRE={tre_iter:.6e}  norm_grad_u={norm_grad_u:.6e}  norm_grad_uh={norm_grad_uh:.6e}  n_vertices={n_vertices_iter}")
+        if norm_grad_u < 1e-30:
+            print("  WARNING: exact solution norm is ~0 — problem is degenerate, stopping loop.")
             break
 # ---- Step 2c: PPR diagnostic (remove after debugging) -----
         if k == 2:
@@ -443,6 +708,8 @@ def run_adaptive_poisson(
             from diagnose_ppr import diagnose_ppr
             print(f"\n[2c] PPR diagnostic (loop {loop_idx}):")
             diagnose_ppr(u_h, u_numpy, _Gh_diag, degree_raise=degree_raise)
+            if patch_cond_diag is not None:
+                _save_patch_cond_hist(u_h, msh, loop_idx, results_dir, patch_cond_diag)
         # ---- Step 3: Cell-wise quantities -------------------------
         print("\n[3] Computing cell-wise quantities...")
         svd = compute_jacobian_svd(msh)
@@ -472,6 +739,19 @@ def run_adaptive_poisson(
         eta_k_i = np.asarray(res1)[None, :] * np.asarray(omegas)
         print(f"  eta_k_i shape: {eta_k_i.shape}  (directions × cells)")
 
+        # Per-iteration estimator metrics — stored in iter_entry so every loop row in the CSV has them
+        eta_aniso  = float(np.sqrt(np.sum(np.asarray(eta_k))))
+        gdim       = msh.geometry.dim
+        eta_zz_val = float(np.sqrt(sum(np.sum(G[(i, i)]) for i in range(gdim))))
+        iter_entry.update({
+            "ERE_anisotropic": float(eta_aniso  / norm_grad_uh) if norm_grad_uh > 1e-30 else float('nan'),
+            "EI_anisotropic":  float(eta_aniso  / norm_grad_e)  if norm_grad_e  > 1e-30 else float('nan'),
+            "ERE_ZZ":          float(eta_zz_val / norm_grad_uh) if norm_grad_uh > 1e-30 else float('nan'),
+            "EI_ZZ":           float(eta_zz_val / norm_grad_e)  if norm_grad_e  > 1e-30 else float('nan'),
+            "eta_anisotropic": eta_aniso,
+            "eta_ZZ":          eta_zz_val,
+        })
+
         # ---- Step 4: Vertex-wise quantities -----------------------
         print("\n[4] Computing vertex-wise quantities...")
         G_P_arr, Q = compute_G_P(u_h, G)
@@ -484,10 +764,24 @@ def run_adaptive_poisson(
         h_p, coarsen_any, refine_any = adapt_h(msh, eta_k_i, u_h, tol, lambda_p, alpha, correction_factor, sigma_p)
         h_p = np.clip(h_p, hmin, hmax)
         # Cap per-vertex anisotropy to prevent metric eigenvalue explosion.
-        # Without this, h_p → hmin in one direction gives λ = 1/hmin² → MMG3D failure.
         MAX_H_RATIO = 1e3  # limits λ_max/λ_min ≤ 1e6 in the metric
         h_min_per_vtx = np.max(h_p, axis=1, keepdims=True) / MAX_H_RATIO
         h_p = np.maximum(h_p, h_min_per_vtx)
+        # ---- ISOTROPIC OVERRIDE (diagnostic) -------------------------
+        # Force isotropic elements by taking the smallest prescribed
+        # size across all 3 directions at each vertex.
+        # Set FORCE_ISOTROPIC = True to activate.
+        FORCE_ISOTROPIC = False
+        if FORCE_ISOTROPIC:
+            h_min_per_vertex = np.min(h_p, axis=1, keepdims=True)  # (n_verts, 1)
+            h_p = np.broadcast_to(h_min_per_vertex, h_p.shape).copy()  # (n_verts, 3)
+            print(f"  [ISO] Forced isotropic: h = min(h1,h2,h3) per vertex")
+            print(f"  [ISO] h range: [{h_p.min():.4e}, {h_p.max():.4e}]")
+        # ---------------------------------------------------------------## [ISOTROPIC TEST k=2] Force isotropic adaptation: broadcast the per-vertex minimum
+        ## h across all directions so the metric is scalar (no anisotropy).
+        #h_iso = np.min(h_p, axis=1, keepdims=True)          # (n_verts, 1) — smallest h per vertex
+        #h_p   = np.broadcast_to(h_iso, h_p.shape).copy()    # same h in every direction
+        #h_p   = np.clip(h_p, hmin, hmax)
         n_coarsen = int(np.sum(coarsen_any))
         n_refine  = int(np.sum(refine_any))
 
@@ -583,22 +877,18 @@ def run_adaptive_poisson(
                 time=float(loop_idx),
             )
 
-            # Reuse norms computed in the per-iteration block above
-            eta_aniso = float(np.sqrt(np.sum(np.asarray(eta_k))))
-            gdim = msh.geometry.dim
-            eta_zz_val = float(
-                np.sqrt(sum(np.sum(G[(i, i)]) for i in range(gdim)))
-            )
-
+            # eta_aniso / eta_zz_val already computed per-iteration above — reuse them
             final_metrics = {
-                "n_vertices": n_vertices_iter,
-                "TRE": tre_iter,
-                "ERE_anisotropic": float(eta_aniso / norm_grad_uh),
-                "EI_anisotropic": float(eta_aniso / norm_grad_e),
-                "ERE_ZZ": float(eta_zz_val / norm_grad_uh),
-                "EI_ZZ": float(eta_zz_val / norm_grad_e),
+                "n_vertices":      n_vertices_iter,
+                "TRE":             tre_iter,
+                "ERE_anisotropic": iter_entry["ERE_anisotropic"],
+                "EI_anisotropic":  iter_entry["EI_anisotropic"],
+                "ERE_ZZ":          iter_entry["ERE_ZZ"],
+                "EI_ZZ":           iter_entry["EI_ZZ"],
                 "eta_anisotropic": eta_aniso,
-                "eta_ZZ": eta_zz_val,
+                "eta_ZZ":          eta_zz_val,
+                "max_aspect_ratio": max_ar_iter,
+                "avg_aspect_ratio": avg_ar_iter,
             }
 
             print("  Final metrics:")
