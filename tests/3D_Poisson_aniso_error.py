@@ -94,7 +94,7 @@ for N1, N2, N3 in configs:
     EI_isos.append(EI_iso)
 
     # --- ZZ estimator ---
-    G = compute_G_tilde(uh)
+    G, _ = compute_G_tilde(uh)
     gdim = domain.geometry.dim
     eta_ZZ = np.sqrt(max(sum(np.sum(G[(i, i)]) for i in range(gdim)), 0.0))
     EI_ZZ = eta_ZZ / norm_grad_e
