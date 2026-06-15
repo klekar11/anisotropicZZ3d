@@ -57,6 +57,9 @@ def parse_args():
                    help="Exact inner cylindrical wall radius for snapping (default: 200.0)")
     p.add_argument("--snap-r-outer",    type=float, default=800.0, dest="snap_r_outer",
                    help="Exact outer cylindrical wall radius for snapping (default: 800.0)")
+    p.add_argument("--cellwise-diag", action="store_true", default=True,
+                   dest="cellwise_diag",
+                   help="Write per-cell PPR diagnostic XDMF after each TOL solve (k=2 only)")
     return p.parse_args()
 
 
@@ -117,15 +120,36 @@ def main():
             "r_outer": args.snap_r_outer,
         }
 
+    # Condition-number histogram: only active for k=2; reuses layer params.
+    _patch_cond_diag = _PPR_LAYER_PARAMS.get(
+        args.problem,
+        dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.3),
+    ) if args.k == 2 else None
+
     prev_mesh_file    = args.mesh   # None → generate from scratch on first TOL
     all_iter_metrics  = {}
     all_final_metrics = {}
+
+    # ── interior-box diagnostic (delete this block to restore original behaviour)
+    # Restrict PPR error integrals to cells whose centroid lies inside
+    # [-0.8, 0.8]^3, isolating boundary-patch effects from bulk convergence.
+    # Set to None to disable.
+    INTERIOR_BOX = (-0.8, 0.8)
+    # ─────────────────────────────────────────────────────────────────────────
 
     # PPR convergence tracker — only active for k=2 (Naga-Zhang estimator)
     ppr_tracker = None
     if args.k == 2:
         from nz_eta_estimatorP2 import Gh as _Gh
-        _grad_ex = get_grad_exact(args.problem)
+        _grad_np = get_grad_exact(args.problem)
+
+        def _grad_ex_factory(msh, _g=_grad_np):
+            from dolfinx import fem as _fem
+            V = _fem.functionspace(msh, ("Lagrange", 4, (3,)))
+            g = _fem.Function(V)
+            g.interpolate(_g)
+            return g
+
         _layer_kw = _PPR_LAYER_PARAMS.get(
             args.problem,
             dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.3),
@@ -155,15 +179,28 @@ def main():
             k                 = args.k,
             mmg_extra_args    = mmg_extra,
             tok_snap          = tok_snap,
+            patch_cond_diag   = _patch_cond_diag,
         )
 
-        prev_mesh_file = tol_dir / "meshes" / f"mesh_{args.n_loop - 1}.mesh"
+        _numbered = sorted(
+            (p for p in (tol_dir / "meshes").glob("mesh_*.mesh") if p.stem[5:].isdigit()),
+            key=lambda p: int(p.stem[5:]),
+        )
+        prev_mesh_file = _numbered[-1] if _numbered else None
 
         all_iter_metrics[tol]  = iter_metrics
         all_final_metrics[tol] = final_metrics
 
         if ppr_tracker is not None:
-            ppr_tracker.record(tol, msh, u_h, _Gh, _grad_ex, h_p=h_p)
+            ppr_tracker.record(tol, msh, u_h, u_exact, _Gh, _grad_ex_factory,
+                               h_p=h_p, interior_box=INTERIOR_BOX)
+
+        if args.cellwise_diag and ppr_tracker is not None:
+            from ppr_cellwise_diagnostic import write_cellwise_diagnostic
+            write_cellwise_diagnostic(
+                u_h, u_exact, _Gh, _grad_ex_factory,
+                output_path=tol_dir / "ppr_cellwise_diag.xdmf",
+            )
 
         print(f"\nFinal metrics for TOL={tol}:")
         for key, value in final_metrics.items():
@@ -172,11 +209,20 @@ def main():
     csv_path = results_dir / "convergence.csv"
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["tol", "loop_idx", "n_vertices", "n_cells", "TRE", "max_aspect_ratio", "avg_aspect_ratio", "n_coarsen", "n_refine", "n_cells_coarsen", "n_cells_refine"])
+        writer.writerow([
+            "tol", "loop_idx", "n_vertices", "n_cells", "TRE",
+            "ERE_anisotropic", "EI_anisotropic", "ERE_ZZ", "EI_ZZ",
+            "eta_anisotropic", "eta_ZZ",
+            "max_aspect_ratio", "avg_aspect_ratio",
+            "n_coarsen", "n_refine", "n_cells_coarsen", "n_cells_refine",
+        ])
         for tol in tol_values:
             for entry in all_iter_metrics[tol]:
                 writer.writerow([
                     tol, entry["loop_idx"], entry["n_vertices"], entry["n_cells"], entry["TRE"],
+                    entry.get("ERE_anisotropic", ""), entry.get("EI_anisotropic", ""),
+                    entry.get("ERE_ZZ", ""), entry.get("EI_ZZ", ""),
+                    entry.get("eta_anisotropic", ""), entry.get("eta_ZZ", ""),
                     entry["max_aspect_ratio"], entry["avg_aspect_ratio"],
                     entry["n_coarsen"], entry["n_refine"],
                     entry["n_cells_coarsen"], entry["n_cells_refine"],

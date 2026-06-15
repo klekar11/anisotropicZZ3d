@@ -5,6 +5,7 @@
 mmg_tests/cube_results
 mmg_tests/cube_bands_results
 mmg_tests/zz_cube*
+mmg_tests/tokamak_border
 
 mmg_tests/zz_tok*
 parallel/
@@ -22,4 +23,16 @@ poisson_cube/plot_tre_vs_vertices.py
 *.vtk
 tokamak/
 time/
-
+concat_snap_stats.py
+check_surface_verts.py
+poisson_cube/NZ_1d_diagnos*
+tests/*.pdf
+make_metrics_table.py
+plot_snap_stats.py
+plot_surface_dev.py
+poisson_cube/NZ_1d_diag/
+poisson_cube/NZ_1d_hgrad/
+poisson_cube/NZ_diag_iso/
+poisson_cube/cube/
+poisson_cube/export_legend.py
+poisson_cube/plot_errors_per_tol.py

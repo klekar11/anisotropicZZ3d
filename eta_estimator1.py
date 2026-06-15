@@ -262,8 +262,8 @@ def compute_sigma_P(
     n_vertices = domain.topology.index_map(0).size_local
 
     # Per-cell contributions — vectorized over all cells at once
-    num_per_cell = np.sum(eta_k_i ** 2, axis=0)            # (n_cells,)
-    den_per_cell = np.sqrt(np.sum(eta_k_i ** 4, axis=0))   # (n_cells,)
+    num_per_cell = np.sum(eta_k_i, axis=0)            # (n_cells,)
+    den_per_cell = np.sqrt(np.sum(eta_k_i ** 2, axis=0))   # (n_cells,)
 
     # Scatter to vertex patches: repeat each cell's value once per patch vertex
     ctv_flat = cell_to_vertex.array                                      # (n_cells*(tdim+1),)
@@ -342,7 +342,8 @@ def adapt_h(
         for i in range(gdim):
             eta_i_at_P[i, P] = np.sum(eta_k_i[i, cells_of_P])
 
-    h_p = np.sqrt(2) * lambda_p.copy()
+    h_base = np.sqrt(2) * lambda_p
+    h_p = h_base.copy()
     
     coarsen_any = np.zeros(n_verts, dtype=bool)
     refine_any  = np.zeros(n_verts, dtype=bool)
@@ -357,11 +358,11 @@ def adapt_h(
         n_ok = int(np.sum(ok_mask))
 
         coarsen = lower > eta_sum
-        h_p[coarsen, i_dir] = correction_factor * lambda_p[coarsen, i_dir]
+        h_p[coarsen, i_dir] = correction_factor * h_base[coarsen, i_dir]
         coarsen_any |= coarsen
 
         refine = eta_sum > upper
-        h_p[refine, i_dir] = lambda_p[refine, i_dir] / correction_factor
+        h_p[refine, i_dir] = h_base[refine, i_dir] / correction_factor
         refine_any |= refine
 
         print(

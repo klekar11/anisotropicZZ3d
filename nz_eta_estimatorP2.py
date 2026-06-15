@@ -235,16 +235,43 @@ def Gh(uh):
     n2e_arr = get_nodes_to_elem_array(mesh)
     boundary = find_boundary(mesh)
     
-    Ghuh_dofs = _Gh(
+    Ghuh_dofs, _ = _Gh(
         nodes, elems, dofs, uh.x.array,
         n2e_arr, boundary, v2d,
         V.dofmap.list,
     )
-    
+
     V2 = fem.functionspace(mesh, ("Lagrange", 2, (3,)))
     Ghuh = fem.Function(V2)
     Ghuh.x.array[:] = Ghuh_dofs.flatten()
     return Ghuh
+
+
+def Gh_with_cond(uh):
+    '''Like Gh() but also returns cond_arr[i] = κ(A^T A) for vertex i.'''
+    V = uh.function_space
+    mesh = V.mesh
+    assert mesh.topology.dim == 3, "This module is for 3D meshes."
+
+    dofs = V.tabulate_dof_coordinates()[:, :3]
+    v2d = vertex_to_dof_map(mesh, V)
+
+    nodes = mesh.geometry.x[:, :3]
+    conn = mesh.topology.connectivity(mesh.topology.dim, 0)
+    elems = conn.array.reshape((-1, 4))
+    n2e_arr = get_nodes_to_elem_array(mesh)
+    boundary = find_boundary(mesh)
+
+    Ghuh_dofs, cond_arr = _Gh(
+        nodes, elems, dofs, uh.x.array,
+        n2e_arr, boundary, v2d,
+        V.dofmap.list,
+    )
+
+    V2 = fem.functionspace(mesh, ("Lagrange", 2, (3,)))
+    Ghuh = fem.Function(V2)
+    Ghuh.x.array[:] = Ghuh_dofs.flatten()
+    return Ghuh, cond_arr
 
 
 # --- Original parallel core (BUGGY — race condition on mid-edge DOFs) -------
@@ -333,6 +360,7 @@ def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
     Nnodes = nodes.shape[0]
     Ndofs = dofs.shape[0]
     Ghuh = np.zeros((Ndofs, 3))
+    cond_arr = np.zeros(Nnodes)
 
     for i in range(Nnodes):
         on_boundary = B[i]
@@ -380,6 +408,9 @@ def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
         Atb = A.T @ b
         a = np.linalg.solve(AtA, Atb)
 
+        _, sv, _ = np.linalg.svd(AtA)
+        cond_arr[i] = sv[0] / sv[-1] if sv[-1] > 1e-300 else 1e300
+
         k_vertex = v2d[i]
         Ghuh[k_vertex, 0] = a[1] / hx
         Ghuh[k_vertex, 1] = a[2] / hy
@@ -396,4 +427,4 @@ def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
             Ghuh[l, 1] += 0.5 * gy / hy
             Ghuh[l, 2] += 0.5 * gz / hz
 
-    return Ghuh
+    return Ghuh, cond_arr
