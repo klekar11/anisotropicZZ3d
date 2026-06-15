@@ -4,9 +4,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-PROBLEM="1d"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall"
+PROBLEM="sphere"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall"
 K=2                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
-RESULTS="NZ_1d_diagnostic" # output directory name (created inside poisson_cube/)
+RESULTS="cube/nz_res_sphere_0.01" # output directory name (created inside poisson_cube/)
 
 # Starting mesh:
 #   leave empty to generate the initial mesh from scratch (cube problems)
@@ -16,10 +16,10 @@ MESH=""
 
 N_LOOP=20             # adaptive iterations per tolerance
 TOL_START=1          # first tolerance value
-N_TOL=5            # number of tolerance halvings (sequence: TOL_START / 2^i)
+N_TOL=5 # number of tolerance halvings (sequence: TOL_START / 2^i)
 
-HMAX=1
-HMIN=1e-7
+HMAX=2
+HMIN=1e-6
 HGRAD=-1
 ALPHA=0.25
 CORRECTION_FACTOR=1.5
@@ -41,10 +41,9 @@ MMG3D="/usr/local/bin/mmg3d_O3"
 #   EXTRA_ARGS=(--mmg-extra="-hausd 6.0")           # hausdorff control, no nosurf
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0")  # both
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0 -ar 21")  # multiple MMG flags
-
-EXTRA_ARGS=()     # hausdorff control, no nosurf
+EXTRA_ARGS=() 
 # Tokamak wall snapping — set SNAP_WALLS to true to enable
-SNAP_WALLS=false
+SNAP_WALLS=False
 SNAP_R_INNER=200.0
 SNAP_R_OUTER=800.0
 # ---------------------------------------------------------------------------

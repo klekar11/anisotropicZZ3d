@@ -276,17 +276,13 @@ def solve_poisson_generic(
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
 
-    if isinstance(f, fem.Function):
-        # already a coefficient — use directly
+    if isinstance(f, ufl.core.expr.Expr):
+        # Use the UFL expression directly so it is evaluated at Gauss quadrature
+        # points during assembly. Pre-interpolating onto CG-k nodal points loses
+        # thin-layer sources (e.g. sphere ε=0.05) when no vertex falls in the layer.
         f_coeff = f
-    elif isinstance(f, ufl.core.expr.Expr):
-        # pre-interpolate to avoid FFCX building huge quadrature tables
-        # for complex symbolic expressions (e.g. div(grad(tanh(...))))
-        F = fem.Function(V)
-        F.interpolate(fem.Expression(f, V.element.interpolation_points))
-        f_coeff = F
     else:
-        # numpy callable
+        # numpy callable or already a fem.Function
         F = fem.Function(V)
         F.interpolate(f)
         f_coeff = F

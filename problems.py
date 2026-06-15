@@ -2,8 +2,8 @@
 import numpy as np
 import ufl
 
-EPSILON_1D     = 0.1
-EPSILON_SPHERE = 0.05
+EPSILON_1D     = 0.1 
+EPSILON_SPHERE = 0.01
 R_SPHERE       = 0.5
 EPSILON_PLAN   = 0.01
 # Tokamak wall-adaptation problem parameters (distances in mm)
