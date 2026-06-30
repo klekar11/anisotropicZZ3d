@@ -12,11 +12,11 @@ R_OUT_WALL = 800.0                          # outer cylindrical wall radius
 A_WALL     = 200.0                          # cosh amplitude / length scale
 RC_WALL    = (R_IN_WALL + R_OUT_WALL) / 2  # radial midpoint = 500 mm
 # TCV tokamak torus parameters (distances in mm)
-R0_TOK      = 640.0   # major radius of the torus axis
+R0_TOK      = 500.0  # major radius of the torus axis
 Z0_TOK      = 400.0   # vertical centre of the cross-section
-Rc_TOK      = 580  # poloidal R-coordinate of the shell centre (= R0_TOK → centred on axis)
+Rc_TOK      = 500.0  # poloidal R-coordinate of the shell centre (= R0_TOK → centred on axis)
 Zc_TOK      = 400.0   # poloidal Z-coordinate of the shell centre (= Z0_TOK → centred on axis)
-r_shell_TOK = 70    # radius of the spherical shell
+r_shell_TOK = 90    # radius of the spherical shell
 EPSILON_TOK = 10.0    # transition-layer half-width
 
 
@@ -37,7 +37,9 @@ def get_problem(name: str) -> tuple:
         return _problem_tok_sphere()
     if name == "tok-wall":
         return _problem_tok_wall()
-    raise ValueError(f"Unknown problem '{name}'. Available: '1d', 'sphere', 'plan', 'tok-sphere', 'tok-wall'.")
+    if name == "tok-sphere-smooth":
+        return _problem_tok_sphere_smooth()
+    raise ValueError(f"Unknown problem '{name}'. Available: '1d', 'sphere', 'plan', 'tok-sphere', 'tok-wall', 'tok-sphere-smooth'.")
 
 
 def _problem_1d(epsilon: float = EPSILON_1D):
@@ -139,6 +141,48 @@ def _problem_tok_sphere(
 
     return f_factory, g, g
 
+def _problem_tok_sphere_smooth(
+    R0: float = R0_TOK,
+    Z0: float = Z0_TOK,
+    Rc: float = Rc_TOK,
+    Zc: float = Zc_TOK,
+    r_shell: float = r_shell_TOK,
+    epsilon: float = EPSILON_TOK,
+):
+    """Globally smooth (C-infinity) toroidal-shell problem.
+
+    Exact solution:  u = 1/2 (1 + tanh(s/eps)),   s = r_shell - d,
+    d = sqrt((sqrt(x^2+y^2) - Rc)^2 + (z - Zc)^2)  (poloidal distance).
+
+    Unlike the cosine-smoothed Heaviside version, u is analytic everywhere:
+    no UFL conditional, f is C-infinity, and Gaussian quadrature integrates
+    the RHS directly without node-sampling artefacts in the layer.
+
+    RHS  f = -Delta u  via the chain rule (|grad s| = 1, Delta s = -Delta d):
+        G'(s)  =  sech^2(s/eps) / (2 eps)
+        G''(s) = -sech^2(s/eps) tanh(s/eps) / eps^2
+        Delta d = 1/d + (Rxy - Rc) / (Rxy d)   [cylindrical Laplacian of d]
+        f = sech^2(s/eps) [ tanh(s/eps)/eps^2 + Delta_d / (2 eps) ]
+    """
+    def f_factory(msh):
+        x     = ufl.SpatialCoordinate(msh)
+        Rxy   = ufl.sqrt(x[0]**2 + x[1]**2 + 1e-16)
+        d     = ufl.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2 + 1e-16)
+        s     = r_shell - d
+        t     = s / epsilon
+        sech2 = 1.0 / ufl.cosh(t)**2
+        lap_d = 1.0 / d + (Rxy - Rc) / (Rxy * d)
+        return sech2 * (ufl.tanh(t) / epsilon**2 + 0.5 * lap_d / epsilon)
+
+    def g(x: np.ndarray) -> np.ndarray:
+        Rxy = np.sqrt(x[0]**2 + x[1]**2)
+        d   = np.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2)
+        s   = r_shell - d
+        return 0.5 * (1.0 + np.tanh(s / epsilon))
+
+    return f_factory, g, g
+
+
 def _problem_tok_wall(
     Rc: float = RC_WALL,
     a:  float = A_WALL,
@@ -202,6 +246,8 @@ def get_grad_exact(name: str):
         return _grad_tok_sphere()
     if name == "tok-wall":
         return _grad_tok_wall()
+    if name == "tok-sphere-smooth":
+        return _grad_tok_sphere_smooth()
     raise ValueError(f"Unknown problem '{name}'.")
 
 
@@ -253,6 +299,28 @@ def _grad_tok_sphere(
         out[0] = h_prime * (-(Rxy - Rc) / d_safe * x[0] / Rxy_safe)
         out[1] = h_prime * (-(Rxy - Rc) / d_safe * x[1] / Rxy_safe)
         out[2] = h_prime * (-(x[2] - Zc) / d_safe)
+        return out
+    return grad_u
+
+
+def _grad_tok_sphere_smooth(
+    Rc: float = Rc_TOK,
+    Zc: float = Zc_TOK,
+    r_shell: float = r_shell_TOK,
+    epsilon: float = EPSILON_TOK,
+):
+    def grad_u(x):  # x: (3, n) -> (3, n)
+        Rxy = np.sqrt(x[0]**2 + x[1]**2)
+        d   = np.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2)
+        s   = r_shell - d
+        t   = s / epsilon
+        gp  = (1.0 - np.tanh(t)**2) / (2.0 * epsilon)   # G'(s) = sech^2(t)/(2 eps)
+        d_safe   = np.where(d   < 1e-14, 1.0, d)
+        Rxy_safe = np.where(Rxy < 1e-14, 1.0, Rxy)
+        out = np.zeros_like(x)
+        out[0] = -gp * (Rxy - Rc) / d_safe * x[0] / Rxy_safe
+        out[1] = -gp * (Rxy - Rc) / d_safe * x[1] / Rxy_safe
+        out[2] = -gp * (x[2] - Zc) / d_safe
         return out
     return grad_u
 

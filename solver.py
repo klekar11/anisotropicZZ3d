@@ -246,16 +246,21 @@ def solve_poisson_generic(
     f,
     g: Callable[[np.ndarray], np.ndarray],
     k: int = 1,
+    quadrature_degree: int | None = None,
 ) -> tuple:
     """Solve -Δu = f, u|∂Ω = g using Pk finite elements.
 
     Parameters
     ----------
-    msh : dolfinx.mesh.Mesh
-    f   : UFL expression or numpy callable for the RHS.
-          If a numpy callable, it is interpolated into a CG-k Function.
-    g   : numpy callable for the Dirichlet BC.
-    k   : polynomial degree (1 or 2).
+    msh               : dolfinx.mesh.Mesh
+    f                 : UFL expression or numpy callable for the RHS.
+                        If a numpy callable, it is interpolated into a CG-k Function.
+    g                 : numpy callable for the Dirichlet BC.
+    k                 : polynomial degree (1 or 2).
+    quadrature_degree : override the default quadrature degree used in assembly.
+                        Pass e.g. 2*k+6 for smooth but sharply-peaked RHS (tok-sphere-smooth)
+                        so that f is evaluated at Gauss points rather than pre-interpolated.
+                        None → let FEniCSx choose automatically.
 
     Returns
     -------
@@ -287,8 +292,13 @@ def solve_poisson_generic(
         F.interpolate(f)
         f_coeff = F
 
-    a = ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx
-    L = f_coeff * v * ufl.dx
+    dx_meta = (
+        ufl.dx(metadata={"quadrature_degree": quadrature_degree})
+        if quadrature_degree is not None
+        else ufl.dx
+    )
+    a = ufl.dot(ufl.grad(u), ufl.grad(v)) * dx_meta
+    L = f_coeff * v * dx_meta
 
     problem = LinearProblem(
         a, L, bcs=[bc],

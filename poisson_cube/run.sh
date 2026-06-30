@@ -4,22 +4,22 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-PROBLEM="sphere"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall"
-K=2                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
-RESULTS="cube/nz_res_sphere_0.01" # output directory name (created inside poisson_cube/)
+PROBLEM="tok-wall"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall" | "tok-sphere-smooth"
+K=1                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
+RESULTS="tokamak/zz_wall_nosurf" # output directory name (created inside poisson_cube/)
 
 # Starting mesh:
 #   leave empty to generate the initial mesh from scratch (cube problems)
 #   for tok-sphere set to the TCV mesh relative to this script:
 #     MESH="$SCRIPT_DIR/../tokamak/TCV.mesh"
-MESH=""
+MESH="../tokamak/TCV.mesh"
 
-N_LOOP=20             # adaptive iterations per tolerance
+N_LOOP=20            # adaptive iterations per tolerance
 TOL_START=1          # first tolerance value
-N_TOL=5 # number of tolerance halvings (sequence: TOL_START / 2^i)
+N_TOL=3  # number of tolerance halvings (sequence: TOL_START / 2^i)
 
-HMAX=2
-HMIN=1e-6
+HMAX=300
+HMIN=1e-7
 HGRAD=-1
 ALPHA=0.25
 CORRECTION_FACTOR=1.5
@@ -30,7 +30,7 @@ MMG3D="/usr/local/bin/mmg3d_O3"
 #
 # --nosurf                    preserve the TCV surface mesh during MMG3D adaptation
 # --mmg-extra="..."           additional MMG3D flags as a single quoted string
-#
+
 # IMPORTANT: always use = to attach the value to --mmg-extra (no space).
 # A space would make bash pass two words and argparse would misread the
 # leading "-" of the MMG flag as a new Python argument.
@@ -41,7 +41,7 @@ MMG3D="/usr/local/bin/mmg3d_O3"
 #   EXTRA_ARGS=(--mmg-extra="-hausd 6.0")           # hausdorff control, no nosurf
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0")  # both
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0 -ar 21")  # multiple MMG flags
-EXTRA_ARGS=() 
+EXTRA_ARGS=(--nosurf --mmg-extra="-hgradreq -1")
 # Tokamak wall snapping — set SNAP_WALLS to true to enable
 SNAP_WALLS=False
 SNAP_R_INNER=200.0

@@ -20,13 +20,14 @@ _PPR_LAYER_PARAMS = {
     "plan":       dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.05),
     "sphere":     dict(layer_dir=0, layer_centre=0.5, layer_half_width=0.1),
     "tok-sphere": dict(layer_dir=2, layer_centre=400.0, layer_half_width=40.0),
-    "tok-wall":   dict(layer_dir=0, layer_centre=500.0, layer_half_width=150.0),
+    "tok-wall":          dict(layer_dir=0, layer_centre=500.0, layer_half_width=150.0),
+    "tok-sphere-smooth": dict(layer_dir=2, layer_centre=400.0, layer_half_width=40.0),
 }
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Anisotropic adaptive Poisson solver")
-    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere", "tok-wall"],
+    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere", "tok-wall", "tok-sphere-smooth"],
                    help="Problem type (default: 1d)")
     p.add_argument("--k",        type=int, default=1, choices=[1, 2],
                    help="FE degree and estimator: 1=ZZ, 2=Naga-Zhang (default: 1)")
@@ -103,8 +104,15 @@ def main():
 
     f_factory, g_np, u_exact = get_problem(args.problem)
 
+    # For the smooth problem, f is C-infinity so we can evaluate it directly at
+    # Gauss points instead of pre-interpolating onto CG-k nodes.  A raised
+    # quadrature degree ensures the sharp sech^2 peak is integrated accurately
+    # even when h ~ eps (the layer is resolved but still narrow relative to k).
+    _quad_deg = (2 * args.k + 6) if args.problem == "tok-sphere-smooth" else None
+
     def make_solver(msh):
-        return solve_poisson_generic(msh, f_factory(msh), g_np, args.k)
+        return solve_poisson_generic(msh, f_factory(msh), g_np, args.k,
+                                     quadrature_degree=_quad_deg)
 
     mmg_extra: list | None = []
     if args.nosurf:
@@ -130,11 +138,19 @@ def main():
     all_iter_metrics  = {}
     all_final_metrics = {}
 
-    # ── interior-box diagnostic (delete this block to restore original behaviour)
-    # Restrict PPR error integrals to cells whose centroid lies inside
-    # [-0.8, 0.8]^3, isolating boundary-patch effects from bulk convergence.
-    # Set to None to disable.
-    INTERIOR_BOX = (-0.8, 0.8)
+    # ── interior-region diagnostic ────────────────────────────────────────────
+    # Restrict PPR error integrals to an interior sub-domain to isolate
+    # boundary-patch effects from bulk convergence.
+    #
+    # INTERIOR_BOX    : (lo, hi) applied to all Cartesian coordinates.
+    #                   Use for cube/box domains, e.g. (-0.8, 0.8) on [-1,1]^3.
+    # INTERIOR_CYLINDER: (R_lo, R_hi, z_lo, z_hi) in cylindrical coordinates.
+    #                   Use for tokamak/annular domains.
+    #                   Set whichever is unused to None.
+    _is_tokamak = args.problem in ("tok-sphere", "tok-sphere-smooth", "tok-wall")
+    INTERIOR_BOX      = None if _is_tokamak else (-0.8, 0.8)
+    # 50 mm margin from each wall: R 200→250, 800→750; z 0→50, 800→750
+    INTERIOR_CYLINDER = (250.0, 750.0, 50.0, 750.0) if _is_tokamak else None
     # ─────────────────────────────────────────────────────────────────────────
 
     # PPR convergence tracker — only active for k=2 (Naga-Zhang estimator)
@@ -193,7 +209,8 @@ def main():
 
         if ppr_tracker is not None:
             ppr_tracker.record(tol, msh, u_h, u_exact, _Gh, _grad_ex_factory,
-                               h_p=h_p, interior_box=INTERIOR_BOX)
+                               h_p=h_p, interior_box=INTERIOR_BOX,
+                               interior_cylinder=INTERIOR_CYLINDER)
 
         if args.cellwise_diag and ppr_tracker is not None:
             from ppr_cellwise_diagnostic import write_cellwise_diagnostic
