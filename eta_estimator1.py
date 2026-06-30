@@ -19,30 +19,26 @@ def compute_iso_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr
     v0 = ufl.TestFunction(V0)
     h = ufl.CellDiameter(domain)
     n = ufl.FacetNormal(domain)
-
     R_K = ufl.div(ufl.grad(u_h)) + f
-    b1 = fem.assemble_vector(form(h**2 * ufl.inner(R_K, R_K) * v0 * ufl.dx)) # pyright: ignore[reportOperatorIssue]
+    b1 = fem.assemble_vector(form(h**2 * ufl.inner(R_K, R_K) * v0 * ufl.dx))
 
-    h_K = h('+')
+    h_avg = ufl.avg(h)                       # symmetric facet size
     jump_n = ufl.jump(ufl.grad(u_h), n)
     b2 = fem.assemble_vector(
-        form(0.25 * h_K * ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS) # type: ignore
+        form((0.5 ** 2) * h * ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS)
     )
-
     if g_N is not None:
         neumann_res = ufl.dot(ufl.grad(u_h), n) - g_N
         b3 = fem.assemble_vector(
-            form(h * ufl.inner(neumann_res, neumann_res) * v0 * ufl.ds)
+           form(h * ufl.inner(neumann_res, neumann_res) * v0 * ufl.ds)
         )
         b3_array = b3.array
     else:
         # pure Dirichlet: boundary contribution is exactly zero
         b3_array = np.zeros_like(b2.array)
 
-    # no n_owned slicing: all entries are owned on a single process
-    term1 = np.sqrt(b1.array)
-    term2 = np.sqrt(b2.array + b3_array)
-    return term2 + term1
+    return np.sqrt(b1.array) + np.sqrt(b2.array) + np.sqrt(b3_array)
+    
 
 
 def compute_gradient_dg0(u_h: fem.Function):
