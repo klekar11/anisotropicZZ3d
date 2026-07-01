@@ -260,7 +260,7 @@ def main():
 
     if ppr_tracker is not None:
         ppr_tracker.print_table()
-        ppr_tracker.plot(str(results_dir / "ppr_convergence.pdf"))
+        ppr_tracker.to_csv(str(results_dir / "ppr_convergence.csv"))
 
 
 if __name__ == "__main__":
