@@ -23,18 +23,22 @@ class PPRConvergenceTracker:
       E = ||G_h(u_h) − G_h(I²u)||    PPR sensitivity (PDE vs interpolation error)
       F = ||∇(I²u) − ∇u_h||          supercloseness
 
-    Expected rates (P2, w.r.t. h_z in the boundary layer):
+    The convergence variable is the global mesh vertex count ``n_verts``
+    (N_v).  Each record also stores ``lambda3_max`` / ``lambda3_min`` — the
+    extremes over all vertices of the smallest per-vertex Jacobian singular
+    value λ₃,ₖ, i.e. the finest (layer-normal) mesh size.
+
+    Expected rates (P2) — on a quasi-uniform 3-D mesh N_v ~ h⁻³, so an
+    O(hᵖ) error decays like O(N_v^{-p/3}):
       A ~ O(h²),  B ~ O(h²),  C ~ O(h³) if superconvergent.
       D ~ O(h³),  E ~ o(h²),  F ~ O(h³)  (supercloseness).
 
     Parameters
     ----------
-    layer_dir :
-        Coordinate index (0=x, 1=y, 2=z) that defines the layer normal.
-    layer_centre :
-        Location of the layer centre along ``layer_dir``.
-    layer_half_width :
-        Half-width of the layer used to select representative vertices.
+    layer_dir, layer_centre, layer_half_width :
+        Retained for API compatibility (used by ``_save_patch_cond_hist``).
+        No longer used by :meth:`record`, which now keys convergence on the
+        vertex count rather than a boundary-layer h_z.
     """
 
     def __init__(
@@ -61,7 +65,7 @@ class PPRConvergenceTracker:
         interior_box: "tuple[float, float] | None" = None,
         interior_cylinder: "tuple[float, float, float, float] | None" = None,
     ) -> None:
-        """Record one run's errors and representative h_z.
+        """Record one run's errors, vertex count and layer-normal mesh size.
 
         Parameters
         ----------
@@ -81,9 +85,10 @@ class PPRConvergenceTracker:
             Callable ``grad_u_exact_factory(msh) -> UFL vector expression``
             for the exact gradient ∇u.
         h_p :
-            Optional ``(n_vertices, tdim)`` array from :func:`adapt_h`.
-            When provided ``h_p[:, 2]`` is used for h_z; otherwise h_z
-            is estimated from each in-layer cell's z-vertex range.
+            Deprecated / unused.  Retained so existing callers that pass the
+            ``(n_vertices, tdim)`` array from :func:`adapt_h` keep working.
+            The layer-normal mesh size is now taken from the per-vertex
+            Jacobian singular values (λ₃,ₖ) instead.
         interior_box :
             Optional ``(lo, hi)`` scalar pair.  When provided, a second set
             of A–F errors is computed restricted to cells whose centroid
@@ -102,37 +107,29 @@ class PPRConvergenceTracker:
         from dolfinx import fem as _fem
         import ufl as _ufl
         from dolfinx.fem import form as _form
+        from mpi4py import MPI as _MPI
+        from eta_estimator1 import compute_lambda_P as _compute_lambda_P
 
         tdim = msh.topology.dim
-        coords = msh.geometry.x
 
-        # ---- representative h_z in the boundary layer ----------------
-        vert_in_layer = (
-            np.abs(coords[:, self.layer_dir] - self.layer_centre)
-            < self.layer_half_width
-        )
-        if h_p is not None:
-            h_z_vals = h_p[vert_in_layer, 2]
+        # ---- convergence variable: total number of mesh vertices -----
+        # Replaces the old "median h_z in the layer" abscissa.  Uses the
+        # global count so it is meaningful under MPI.
+        n_verts = int(msh.topology.index_map(0).size_global)
+
+        # ---- boundary-layer mesh size via the smallest singular value
+        # lambda_3,k of the per-vertex Jacobian (k = vertex/patch index).
+        # numpy SVD returns singular values in descending order, so column
+        # index 2 is the finest direction — the layer normal.  We record its
+        # extremes over all vertices: max_k lambda_3,k and min_k lambda_3,k.
+        lambda_p = _compute_lambda_P(u_h)          # (n_vertices, tdim)
+        lam3 = lambda_p[:, 2]
+        if lam3.size:
+            lam3_max_loc, lam3_min_loc = float(lam3.max()), float(lam3.min())
         else:
-            msh.topology.create_connectivity(tdim, 0)
-            ctv = msh.topology.connectivity(tdim, 0).array.reshape(
-                -1, tdim + 1
-            )
-            bary_dir = coords[ctv, self.layer_dir].mean(axis=1)
-            cell_in_layer = (
-                np.abs(bary_dir - self.layer_centre) < self.layer_half_width
-            )
-            z_c = coords[:, 2]
-            h_z_cells = z_c[ctv].max(axis=1) - z_c[ctv].min(axis=1)
-            h_z_vals = h_z_cells[cell_in_layer]
-
-        if len(h_z_vals) == 0:
-            print(
-                f"  [PPRTracker] WARNING: no mesh entities found in layer "
-                f"for tol={tol:.3e}; skipping record."
-            )
-            return
-        h_layer = float(np.median(h_z_vals))
+            lam3_max_loc, lam3_min_loc = -np.inf, np.inf
+        lambda3_max = msh.comm.allreduce(lam3_max_loc, op=_MPI.MAX)
+        lambda3_min = msh.comm.allreduce(lam3_min_loc, op=_MPI.MIN)
 
         # ---- Build I²u: P2 interpolant of the exact solution ---------
         V = u_h.function_space
@@ -160,12 +157,16 @@ class PPRConvergenceTracker:
         E = _l2(G_nz - Gh_I2u)                       # ||G_h(u_h) − G_h(I²u)||
         F = _l2(_ufl.grad(I2u) - _ufl.grad(u_h))    # ||∇(I²u) − ∇u_h||
 
-        entry = {"tol": tol, "h_layer": h_layer,
+        entry = {"tol": tol, "n_verts": n_verts,
+                 "lambda3_max": lambda3_max, "lambda3_min": lambda3_min,
                  "A": A, "B": B, "C": C, "D": D, "E": E, "F": F}
         self._records.append(entry)
         print(
-            f"  [PPRTracker] tol={tol:.3e}  h_z={h_layer:.3e}"
-            f"  A={A:.3e}  B={B:.3e}  C={C:.3e}"
+            f"  [PPRTracker] tol={tol:.3e}  N_v={n_verts}"
+            f"  λ3∈[{lambda3_min:.3e}, {lambda3_max:.3e}]"
+        )
+        print(
+            f"  [PPRTracker]  A={A:.3e}  B={B:.3e}  C={C:.3e}"
         )
         print(
             f"  [PPRTracker]  D={D:.3e}  E={E:.3e}  F={F:.3e}"
@@ -247,16 +248,21 @@ class PPRConvergenceTracker:
 
     # ------------------------------------------------------------------
     def _sorted(self) -> list[dict]:
-        return sorted(self._records, key=lambda r: r["h_layer"])
+        return sorted(self._records, key=lambda r: r["n_verts"])
 
     def print_table(self) -> None:
-        """Print a convergence table sorted by ascending h_z."""
+        """Print a convergence table sorted by ascending N_v (vertex count).
+
+        Convergence rates are computed with respect to log(N_v): for an
+        O(h^p) error on a quasi-uniform 3-D mesh (N_v ~ h^{-3}) the reported
+        rate is ~ -p/3.
+        """
         recs = self._sorted()
 
         def _print_block(label, keys):
             qs = list(keys)
             header = (
-                f"{'tol':>10}  {'h_z':>10}  "
+                f"{'tol':>10}  {'N_v':>10}  "
                 + "  ".join(f"{q:>10}" for q in qs)
                 + "  "
                 + "  ".join(f"{'r'+q:>6}" for q in qs)
@@ -270,15 +276,15 @@ class PPRConvergenceTracker:
                     rate_str = "  ".join(f"{'—':>6}" for _ in qs)
                 else:
                     prev = recs[k - 1]
-                    log_h = np.log(r["h_layer"] / prev["h_layer"])
+                    log_n = np.log(r["n_verts"] / prev["n_verts"])
                     rates = [
-                        np.log(r[q] / prev[q]) / log_h
+                        np.log(r[q] / prev[q]) / log_n if log_n != 0 else float("nan")
                         for q in qs
                     ]
                     rate_str = "  ".join(f"{s:6.2f}" for s in rates)
                 vals_str = "  ".join(f"{r.get(q, float('nan')):>10.3e}" for q in qs)
                 print(
-                    f"  {r['tol']:>8.3e}  {r['h_layer']:>10.3e}"
+                    f"  {r['tol']:>8.3e}  {r['n_verts']:>10d}"
                     f"  {vals_str}  {rate_str}"
                 )
 
@@ -289,11 +295,17 @@ class PPRConvergenceTracker:
                          ("A_int", "B_int", "C_int", "D_int", "E_int", "F_int"))
 
     def to_csv(self, filename: str = "ppr_convergence.csv") -> None:
-        """Dump all recorded runs to a CSV, sorted by ascending h_z.
+        """Dump all recorded runs to a CSV, sorted by ascending N_v.
 
-        Columns: tol, h_layer, A, B, C, D, E, F, and (if present)
-        A_int..F_int. Missing optional columns are left blank.
-        Use ``NZ_diagnosis/plot_ppr_convergence.py`` to turn this CSV into figures.
+        Columns: tol, n_verts, lambda3_max, lambda3_min, A, B, C, D, E, F,
+        and (if present) A_int..F_int. Missing optional columns are left
+        blank. Use ``NZ_diagnosis/plot_ppr_convergence.py`` to turn this CSV
+        into figures.
+
+        ``n_verts`` is the global mesh vertex count (the convergence
+        variable); ``lambda3_max``/``lambda3_min`` are the extremes over
+        all vertices of the smallest per-vertex Jacobian singular value
+        (the boundary-layer / finest-direction mesh size).
         """
         import csv
 
@@ -302,7 +314,8 @@ class PPRConvergenceTracker:
             print("  [PPRTracker] No records yet — nothing to write.")
             return
 
-        fields = ["tol", "h_layer", "A", "B", "C", "D", "E", "F"]
+        fields = ["tol", "n_verts", "lambda3_max", "lambda3_min",
+                  "A", "B", "C", "D", "E", "F"]
         if any("A_int" in r for r in recs):
             fields += ["A_int", "B_int", "C_int", "D_int", "E_int", "F_int"]
 

@@ -45,10 +45,10 @@ def _load_records(csv_path: "str | Path") -> list[dict]:
                     continue
                 rec[k] = float(v)
             recs.append(rec)
-    return sorted(recs, key=lambda r: r["h_layer"])
+    return sorted(recs, key=lambda r: r["n_verts"])
 
 
-def _make_fig(recs, h, subset):
+def _make_fig(recs, n, subset):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -58,23 +58,25 @@ def _make_fig(recs, h, subset):
         vals = np.array([r.get(name, np.nan) for r in recs])
         if np.all(np.isfinite(vals)) and np.all(vals > 0):
             label = info["label"] + (" (int)" if name.endswith("_int") else "")
-            ax.loglog(h, vals, marker=info["marker"], linestyle=info["ls"],
+            ax.loglog(n, vals, marker=info["marker"], linestyle=info["ls"],
                        color=info["color"], linewidth=2, markersize=7, label=label)
     if len(recs) >= 2:
-        h_ref = np.array([h.min(), h.max()])
+        n_ref = np.array([n.min(), n.max()])
         a_key = "A_int" if subset[0].endswith("_int") else "A"
         d_key = "D_int" if subset[0].endswith("_int") else "D"
+        # Reference slopes in N_v.  On a quasi-uniform 3-D mesh N_v ~ h^{-3},
+        # so O(h^2) -> O(N^{-2/3}) and O(h^3) -> O(N^{-1}).
         A_fine = float(recs[-1].get(a_key, recs[-1].get("A", np.nan)))
         if np.isfinite(A_fine):
-            ax.loglog(h_ref, (A_fine / h[-1] ** 2) * h_ref ** 2,
-                      "--", color="gray", lw=1, alpha=0.5, label=r"$O(h^2)$")
+            ax.loglog(n_ref, A_fine * (n_ref / n[-1]) ** (-2.0 / 3.0),
+                      "--", color="gray", lw=1, alpha=0.5, label=r"$O(N_v^{-2/3})$")
         D_fine = float(recs[-1].get(d_key, recs[-1].get("D", np.nan)))
         if np.isfinite(D_fine) and D_fine > 0:
-            ax.loglog(h_ref, (D_fine / h[-1] ** 3) * h_ref ** 3,
-                      ":", color="gray", lw=1, alpha=0.5, label=r"$O(h^3)$")
-    ax.set_xlabel(r"$h_z$", fontsize=13)
+            ax.loglog(n_ref, D_fine * (n_ref / n[-1]) ** (-1.0),
+                      ":", color="gray", lw=1, alpha=0.5, label=r"$O(N_v^{-1})$")
+    ax.set_xlabel(r"$N_v$ (number of mesh vertices)", fontsize=13)
     ncol = 1 if len(subset) <= 3 else 2
-    ax.legend(fontsize=9, loc="upper left", ncol=ncol)
+    ax.legend(fontsize=9, loc="best", ncol=ncol)
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
     return fig
@@ -91,7 +93,7 @@ def plot_ppr_convergence(csv_path: "str | Path", out_path: "str | Path | None" =
         print(f"  [plot_ppr_convergence] No records in {csv_path} — nothing to plot.")
         return
 
-    h = np.array([r["h_layer"] for r in recs])
+    n = np.array([r["n_verts"] for r in recs])
 
     out = Path(out_path).resolve() if out_path else csv_path.resolve().with_suffix(".pdf")
     parent = out.parent
@@ -111,7 +113,7 @@ def plot_ppr_convergence(csv_path: "str | Path", out_path: "str | Path | None" =
         ]
 
     for subset, suffix in subsets:
-        fig = _make_fig(recs, h, subset)
+        fig = _make_fig(recs, n, subset)
         for ext in (".pdf", ".png"):
             p = parent / (stem + suffix + ext)
             fig.savefig(str(p), dpi=400, bbox_inches="tight")
