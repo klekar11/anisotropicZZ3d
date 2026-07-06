@@ -14,7 +14,7 @@ from dolfinx.mesh import create_unit_cube, create_unit_square, locate_entities_b
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from eta_estimator import compute_iso_eta, compute_G_tilde, compute_anisotropic_eta
+from eta_estimator1 import compute_iso_eta, compute_G_tilde, compute_anisotropic_eta
 from error_metrics import compute_error_metrics, compute_error_metrics_ZZ, compute_error_norms
 
 

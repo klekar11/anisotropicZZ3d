@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from eta_estimator import (compute_iso_eta, compute_G_tilde,
+from eta_estimator1 import (compute_iso_eta, compute_G_tilde,
                        compute_anisotropic_eta)
 from error_metrics import compute_error_norms
 

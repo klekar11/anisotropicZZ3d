@@ -4,9 +4,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-PROBLEM="tok-wall"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall" | "tok-sphere-smooth"
+PROBLEM="tok-sphere-smooth"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall" | "tok-sphere-smooth"
 K=1                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
-RESULTS="tokamak/zz_wall_nosurf" # output directory name (created inside poisson_cube/)
+RESULTS="tok" # output directory name (created inside poisson_cube/)
 
 # Starting mesh:
 #   leave empty to generate the initial mesh from scratch (cube problems)
@@ -16,9 +16,9 @@ MESH="../tokamak/TCV.mesh"
 
 N_LOOP=20            # adaptive iterations per tolerance
 TOL_START=1          # first tolerance value
-N_TOL=3  # number of tolerance halvings (sequence: TOL_START / 2^i)
+N_TOL=2 # number of tolerance halvings (sequence: TOL_START / 2^i)
 
-HMAX=300
+HMAX=200
 HMIN=1e-7
 HGRAD=-1
 ALPHA=0.25
@@ -41,7 +41,7 @@ MMG3D="/usr/local/bin/mmg3d_O3"
 #   EXTRA_ARGS=(--mmg-extra="-hausd 6.0")           # hausdorff control, no nosurf
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0")  # both
 #   EXTRA_ARGS=(--nosurf --mmg-extra="-hausd 6.0 -ar 21")  # multiple MMG flags
-EXTRA_ARGS=(--nosurf --mmg-extra="-hgradreq -1")
+EXTRA_ARGS=(--mmg-extra="-hausd 6.0")
 # Tokamak wall snapping — set SNAP_WALLS to true to enable
 SNAP_WALLS=False
 SNAP_R_INNER=200.0

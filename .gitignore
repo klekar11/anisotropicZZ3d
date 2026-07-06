@@ -11,7 +11,6 @@ mmg_tests/zz_tok*
 parallel/
 tests/results
 tests/test_jacobian.py
-tests_nz_norm.py
 __pycache__
 poisson_cube/results*
 poisson_cube/mesh_reorder.py
@@ -23,13 +22,9 @@ poisson_cube/plot_tre_vs_vertices.py
 *.vtk
 tokamak/
 time/
-concat_snap_stats.py
-check_surface_verts.py
 poisson_cube/NZ_1d_diagnos*
 tests/*.pdf
 make_metrics_table.py
-plot_snap_stats.py
-plot_surface_dev.py
 poisson_cube/NZ_1d_diag/
 poisson_cube/NZ_1d_hgrad/
 poisson_cube/NZ_diag_iso/

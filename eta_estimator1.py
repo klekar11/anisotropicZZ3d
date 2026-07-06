@@ -25,7 +25,7 @@ def compute_iso_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr
     h_avg = ufl.avg(h)                       # symmetric facet size
     jump_n = ufl.jump(ufl.grad(u_h), n)
     b2 = fem.assemble_vector(
-        form((0.5 ** 2) * h * ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS)
+        form(0.25 * h_avg * ufl.inner(jump_n, jump_n) * (v0('+') + v0('-')) * ufl.dS)
     )
     if g_N is not None:
         neumann_res = ufl.dot(ufl.grad(u_h), n) - g_N
@@ -39,7 +39,6 @@ def compute_iso_eta(u_h: fem.Function, f: ufl.core.expr.Expr, g_N: ufl.core.expr
 
     return np.sqrt(b1.array) + np.sqrt(b2.array) + np.sqrt(b3_array)
     
-
 
 def compute_gradient_dg0(u_h: fem.Function):
 
