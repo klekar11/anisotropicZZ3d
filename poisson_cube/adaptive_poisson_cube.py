@@ -213,7 +213,7 @@ def main():
                                interior_cylinder=INTERIOR_CYLINDER)
 
         if args.cellwise_diag and ppr_tracker is not None:
-            from ppr_cellwise_diagnostic import write_cellwise_diagnostic
+            from NZ_diagnosis.ppr_cellwise_diagnostic import write_cellwise_diagnostic
             write_cellwise_diagnostic(
                 u_h, u_exact, _Gh, _grad_ex_factory,
                 output_path=tol_dir / "ppr_cellwise_diag.xdmf",

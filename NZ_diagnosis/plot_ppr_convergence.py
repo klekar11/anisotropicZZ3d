@@ -19,17 +19,17 @@ from pathlib import Path
 import numpy as np
 
 _FIELDS = {
-    "A": {"label": r"$A=\|\nabla u_h-\nabla u\|$",
+    "A": {"label": r"$\|\nabla u_h-\nabla u\|$",
           "color": "#1f77b4", "marker": "o", "ls": "-"},
-    "B": {"label": r"$B=\|\nabla u_h-G_h u_h\|$",
+    "B": {"label": r"$\|\nabla u_h-G_h u_h\|$",
           "color": "#ff7f0e", "marker": "s", "ls": "-"},
-    "C": {"label": r"$C=\|G_h u_h-\nabla u\|$",
+    "C": {"label": r"$\|G_h u_h-\nabla u\|$",
           "color": "#2ca02c", "marker": "^", "ls": "-"},
-    "D": {"label": r"$D=\|\nabla u-G_h(I^2 u)\|$",
+    "D": {"label": r"$\|\nabla u-G_h(I^2 u)\|$",
           "color": "#d62728", "marker": "D", "ls": "--"},
-    "E": {"label": r"$E=\|G_h u_h-G_h(I^2 u)\|$",
+    "E": {"label": r"$\|G_h u_h-G_h(I^2 u)\|$",
           "color": "#9467bd", "marker": "v", "ls": "--"},
-    "F": {"label": r"$F=\|\nabla(I^2 u)-\nabla u_h\|$",
+    "F": {"label": r"$\|\nabla(I^2 u)-\nabla u_h\|$",
           "color": "#8c564b", "marker": "P", "ls": "--"},
 }
 
@@ -45,7 +45,7 @@ def _load_records(csv_path: "str | Path") -> list[dict]:
                     continue
                 rec[k] = float(v)
             recs.append(rec)
-    return sorted(recs, key=lambda r: r["n_verts"])
+    return sorted(recs, key=lambda r: r["lambda3_min"])
 
 
 def _make_fig(recs, n, subset):
@@ -60,23 +60,42 @@ def _make_fig(recs, n, subset):
             label = info["label"] + (" (int)" if name.endswith("_int") else "")
             ax.loglog(n, vals, marker=info["marker"], linestyle=info["ls"],
                        color=info["color"], linewidth=2, markersize=7, label=label)
-    if len(recs) >= 2:
-        n_ref = np.array([n.min(), n.max()])
-        a_key = "A_int" if subset[0].endswith("_int") else "A"
+    if len(recs) >= 3:
         d_key = "D_int" if subset[0].endswith("_int") else "D"
-        # Reference slopes in N_v.  On a quasi-uniform 3-D mesh N_v ~ h^{-3},
-        # so O(h^2) -> O(N^{-2/3}) and O(h^3) -> O(N^{-1}).
-        A_fine = float(recs[-1].get(a_key, recs[-1].get("A", np.nan)))
-        if np.isfinite(A_fine):
-            ax.loglog(n_ref, A_fine * (n_ref / n[-1]) ** (-2.0 / 3.0),
-                      "--", color="gray", lw=1, alpha=0.5, label=r"$O(N_v^{-2/3})$")
-        D_fine = float(recs[-1].get(d_key, recs[-1].get("D", np.nan)))
-        if np.isfinite(D_fine) and D_fine > 0:
-            ax.loglog(n_ref, D_fine * (n_ref / n[-1]) ** (-1.0),
-                      ":", color="gray", lw=1, alpha=0.5, label=r"$O(N_v^{-1})$")
-    ax.set_xlabel(r"$N_v$ (number of mesh vertices)", fontsize=13)
+        e_key = "E_int" if subset[0].endswith("_int") else "E"
+        # Compute convergence rates from third-to-last to first point
+        D_vals = np.array([r.get(d_key, np.nan) for r in recs])
+        E_vals = np.array([r.get(e_key, np.nan) for r in recs])
+        
+        # D convergence line - mean rate from all consecutive pairs up to third-to-last
+        if D_vals[0] > 0:
+            rates_D = []
+            for i in range(len(D_vals)-1):
+                if np.isfinite(D_vals[i]) and np.isfinite(D_vals[i+1]) and D_vals[i] > 0 and D_vals[i+1] > 0 and n[i] > 0 and n[i+1] > 0:
+                    rate = np.log(D_vals[i+1] / D_vals[i]) / np.log(n[i+1] / n[i])
+                    rates_D.append(rate)
+            if rates_D:
+                mean_rate_D = np.mean(rates_D)
+                n_line = n
+                D_line = D_vals[0] * (n_line / n[0]) ** mean_rate_D
+                ax.loglog(n_line, D_line, "--", color="black", lw=1.5, alpha=0.7, label=f"Rate: {mean_rate_D:.2f}")
+        
+        # E convergence line - mean rate from all consecutive pairs up to third-to-last
+        if E_vals[0] > 0:
+            rates_E = []
+            for i in range(len(E_vals) - 3):
+                if np.isfinite(E_vals[i]) and np.isfinite(E_vals[i+1]) and E_vals[i] > 0 and E_vals[i+1] > 0 and n[i] > 0 and n[i+1] > 0:
+                    rate = np.log(E_vals[i+1] / E_vals[i]) / np.log(n[i+1] / n[i])
+                    rates_E.append(rate)
+            if rates_E:
+                mean_rate_E = np.mean(rates_E)
+                n_line = n
+                E_line = E_vals[0] * (n_line / n[0]) ** mean_rate_E
+                ax.loglog(n_line, E_line, ":", color="black", lw=1.5, alpha=0.7, label=f"Rate: {mean_rate_E:.2f}")
+    ax.set_xlabel(r"$\lambda_{3,\mathrm{min}}$", fontsize=15)
     ncol = 1 if len(subset) <= 3 else 2
-    ax.legend(fontsize=9, loc="best", ncol=ncol)
+    ax.legend(fontsize=14, loc="best", ncol=ncol,
+              handlelength=1.5, labelspacing=0.4, borderpad=0.6)
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
     return fig
@@ -93,7 +112,7 @@ def plot_ppr_convergence(csv_path: "str | Path", out_path: "str | Path | None" =
         print(f"  [plot_ppr_convergence] No records in {csv_path} — nothing to plot.")
         return
 
-    n = np.array([r["n_verts"] for r in recs])
+    n = np.array([r["lambda3_min"] for r in recs])
 
     out = Path(out_path).resolve() if out_path else csv_path.resolve().with_suffix(".pdf")
     parent = out.parent
@@ -101,14 +120,14 @@ def plot_ppr_convergence(csv_path: "str | Path", out_path: "str | Path | None" =
 
     subsets = [
         (["A", "B", "C"], "_ABC"),
-        (["D", "E", "F"], "_DEF"),
+        (["D", "E"], "_DEF"),
         (list(_FIELDS.keys()), "_all"),
     ]
     has_int = any("A_int" in r for r in recs)
     if has_int:
         subsets += [
             (["A_int", "B_int", "C_int"], "_ABC_int"),
-            (["D_int", "E_int", "F_int"], "_DEF_int"),
+            (["D_int", "E_int"], "_DEF_int"),
             ([k + "_int" for k in _FIELDS], "_all_int"),
         ]
 

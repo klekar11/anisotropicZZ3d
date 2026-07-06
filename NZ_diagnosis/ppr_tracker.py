@@ -111,6 +111,7 @@ class PPRConvergenceTracker:
         from eta_estimator1 import compute_lambda_P as _compute_lambda_P
 
         tdim = msh.topology.dim
+        coords = msh.geometry.x   # used by the interior-box/cylinder masks
 
         # ---- convergence variable: total number of mesh vertices -----
         # Replaces the old "median h_z in the layer" abscissa.  Uses the
