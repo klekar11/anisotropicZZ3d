@@ -20,14 +20,13 @@ _PPR_LAYER_PARAMS = {
     "plan":       dict(layer_dir=0, layer_centre=0.0, layer_half_width=0.05),
     "sphere":     dict(layer_dir=0, layer_centre=0.5, layer_half_width=0.1),
     "tok-sphere": dict(layer_dir=2, layer_centre=400.0, layer_half_width=40.0),
-    "tok-wall":          dict(layer_dir=0, layer_centre=500.0, layer_half_width=150.0),
-    "tok-sphere-smooth": dict(layer_dir=2, layer_centre=400.0, layer_half_width=40.0),
+    "tok-wall":   dict(layer_dir=0, layer_centre=500.0, layer_half_width=150.0),
 }
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Anisotropic adaptive Poisson solver")
-    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere", "tok-wall", "tok-sphere-smooth"],
+    p.add_argument("--problem",  default="1d",   choices=["1d", "sphere", "plan", "tok-sphere", "tok-wall"],
                    help="Problem type (default: 1d)")
     p.add_argument("--k",        type=int, default=1, choices=[1, 2],
                    help="FE degree and estimator: 1=ZZ, 2=Naga-Zhang (default: 1)")
@@ -108,7 +107,7 @@ def main():
     # Gauss points instead of pre-interpolating onto CG-k nodes.  A raised
     # quadrature degree ensures the sharp sech^2 peak is integrated accurately
     # even when h ~ eps (the layer is resolved but still narrow relative to k).
-    _quad_deg = (2 * args.k + 6) if args.problem == "tok-sphere-smooth" else None
+    _quad_deg = (2 * args.k + 6) if args.problem == "tok-sphere" else None
 
     def make_solver(msh):
         return solve_poisson_generic(msh, f_factory(msh), g_np, args.k,
@@ -147,7 +146,7 @@ def main():
     # INTERIOR_CYLINDER: (R_lo, R_hi, z_lo, z_hi) in cylindrical coordinates.
     #                   Use for tokamak/annular domains.
     #                   Set whichever is unused to None.
-    _is_tokamak = args.problem in ("tok-sphere", "tok-sphere-smooth", "tok-wall")
+    _is_tokamak = args.problem in ("tok-sphere", "tok-wall")
     INTERIOR_BOX      = None if _is_tokamak else (-0.8, 0.8)
     # 50 mm margin from each wall: R 200→250, 800→750; z 0→50, 800→750
     INTERIOR_CYLINDER = (250.0, 750.0, 50.0, 750.0) if _is_tokamak else None

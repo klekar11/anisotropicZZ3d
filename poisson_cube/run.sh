@@ -4,7 +4,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Parameters — edit these before running
 # ---------------------------------------------------------------------------
-PROBLEM="tok-sphere-smooth"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall" | "tok-sphere-smooth"
+PROBLEM="tok-sphere"            # "1d" | "sphere" | "plan" | "tok-sphere" | "tok-wall"
 K=1                     # 1 = ZZ estimator (P1), 2 = Naga-Zhang estimator (P2)
 RESULTS="tok" # output directory name (created inside poisson_cube/)
 

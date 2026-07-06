@@ -37,9 +37,7 @@ def get_problem(name: str) -> tuple:
         return _problem_tok_sphere()
     if name == "tok-wall":
         return _problem_tok_wall()
-    if name == "tok-sphere-smooth":
-        return _problem_tok_sphere_smooth()
-    raise ValueError(f"Unknown problem '{name}'. Available: '1d', 'sphere', 'plan', 'tok-sphere', 'tok-wall', 'tok-sphere-smooth'.")
+    raise ValueError(f"Unknown problem '{name}'. Available: '1d', 'sphere', 'plan', 'tok-sphere', 'tok-wall'.")
 
 
 def _problem_1d(epsilon: float = EPSILON_1D):
@@ -90,73 +88,14 @@ def _problem_tok_sphere(
     r_shell: float = r_shell_TOK,
     epsilon: float = EPSILON_TOK,
 ):
-    """Smoothed-Heaviside spherical shell inside a tokamak domain.
-
-    The shell is a sphere of radius ``r_shell`` centred at the poloidal
-    point ``(Rc, Zc)`` (in mm, cylindrical coordinates).  Setting
-    ``Rc = R0, Zc = Z0`` centres the shell on the magnetic axis.
-
-    Exact solution:  u = H_epsilon(s),  s = r_shell - d
-    where d = sqrt((sqrt(x²+y²) - Rc)² + (z - Zc)²) is the poloidal
-    distance from the shell centre, and H_epsilon is the cosine-smoothed
-    Heaviside:
-
-        H_ε(s) = 0                                          s ≤ -ε
-               = (s+ε)/(2ε) + sin(πs/ε)/(2π)              |s| ≤ ε
-               = 1                                          s ≥  ε
-
-    RHS  f = -Δu  via the chain rule:
-        Δu = H_ε''(s)|∇s|² + H_ε'(s) Δs,   |∇s|=1,  Δs = -Δd
-        Δd = 1/d + (R_xy - Rc) / (R_xy · d)   [cylindrical Laplacian of d]
-    """
-    def f_factory(msh):
-        x   = ufl.SpatialCoordinate(msh)
-        Rxy = ufl.sqrt(x[0]**2 + x[1]**2 + 1e-16)
-        d   = ufl.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2 + 1e-16)
-        s   = r_shell - d
-
-        in_layer = ufl.And(ufl.ge(s, -epsilon), ufl.le(s, epsilon))
-
-        lap_d = 1.0 / d + (Rxy - Rc) / (Rxy * d)
-
-        return ufl.conditional(
-            in_layer,
-            ufl.pi / (2.0 * epsilon**2) * ufl.sin(ufl.pi * s / epsilon)
-            + (1.0 / (2.0 * epsilon)) * (1.0 + ufl.cos(ufl.pi * s / epsilon)) * lap_d,
-            ufl.as_ufl(0.0),
-        )
-
-    def g(x: np.ndarray) -> np.ndarray:
-        Rxy = np.sqrt(x[0]**2 + x[1]**2)
-        d   = np.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2)
-        s   = r_shell - d
-        return np.where(
-            s >=  epsilon, 1.0,
-            np.where(
-                s <= -epsilon, 0.0,
-                (s + epsilon) / (2.0 * epsilon)
-                + np.sin(np.pi * s / epsilon) / (2.0 * np.pi),
-            ),
-        )
-
-    return f_factory, g, g
-
-def _problem_tok_sphere_smooth(
-    R0: float = R0_TOK,
-    Z0: float = Z0_TOK,
-    Rc: float = Rc_TOK,
-    Zc: float = Zc_TOK,
-    r_shell: float = r_shell_TOK,
-    epsilon: float = EPSILON_TOK,
-):
     """Globally smooth (C-infinity) toroidal-shell problem.
 
     Exact solution:  u = 1/2 (1 + tanh(s/eps)),   s = r_shell - d,
     d = sqrt((sqrt(x^2+y^2) - Rc)^2 + (z - Zc)^2)  (poloidal distance).
 
-    Unlike the cosine-smoothed Heaviside version, u is analytic everywhere:
-    no UFL conditional, f is C-infinity, and Gaussian quadrature integrates
-    the RHS directly without node-sampling artefacts in the layer.
+    u is analytic everywhere: no UFL conditional, f is C-infinity, and
+    Gaussian quadrature integrates the RHS directly without node-sampling
+    artefacts in the layer.
 
     RHS  f = -Delta u  via the chain rule (|grad s| = 1, Delta s = -Delta d):
         G'(s)  =  sech^2(s/eps) / (2 eps)
@@ -246,8 +185,6 @@ def get_grad_exact(name: str):
         return _grad_tok_sphere()
     if name == "tok-wall":
         return _grad_tok_wall()
-    if name == "tok-sphere-smooth":
-        return _grad_tok_sphere_smooth()
     raise ValueError(f"Unknown problem '{name}'.")
 
 
@@ -279,31 +216,6 @@ def _grad_sphere(R: float = R_SPHERE, epsilon: float = EPSILON_SPHERE):
 
 
 def _grad_tok_sphere(
-    Rc: float = Rc_TOK,
-    Zc: float = Zc_TOK,
-    r_shell: float = r_shell_TOK,
-    epsilon: float = EPSILON_TOK,
-):
-    def grad_u(x):  # x: (3, n) → (3, n)
-        Rxy = np.sqrt(x[0]**2 + x[1]**2)
-        d = np.sqrt((Rxy - Rc)**2 + (x[2] - Zc)**2)
-        s = r_shell - d
-        h_prime = np.where(
-            np.abs(s) < epsilon,
-            (1.0 + np.cos(np.pi * s / epsilon)) / (2.0 * epsilon),
-            0.0,
-        )
-        d_safe = np.where(d < 1e-14, 1.0, d)
-        Rxy_safe = np.where(Rxy < 1e-14, 1.0, Rxy)
-        out = np.zeros_like(x)
-        out[0] = h_prime * (-(Rxy - Rc) / d_safe * x[0] / Rxy_safe)
-        out[1] = h_prime * (-(Rxy - Rc) / d_safe * x[1] / Rxy_safe)
-        out[2] = h_prime * (-(x[2] - Zc) / d_safe)
-        return out
-    return grad_u
-
-
-def _grad_tok_sphere_smooth(
     Rc: float = Rc_TOK,
     Zc: float = Zc_TOK,
     r_shell: float = r_shell_TOK,

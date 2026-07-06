@@ -258,7 +258,7 @@ def solve_poisson_generic(
     g                 : numpy callable for the Dirichlet BC.
     k                 : polynomial degree (1 or 2).
     quadrature_degree : override the default quadrature degree used in assembly.
-                        Pass e.g. 2*k+6 for smooth but sharply-peaked RHS (tok-sphere-smooth)
+                        Pass e.g. 2*k+6 for smooth but sharply-peaked RHS (tok-sphere)
                         so that f is evaluated at Gauss points rather than pre-interpolated.
                         None → let FEniCSx choose automatically.
 
