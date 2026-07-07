@@ -1,5 +1,5 @@
 *.png
-*.mesh
+poisson_cube/*.mesh
 *.sol
 *.vtu
 mmg_tests/cube_results
@@ -8,7 +8,6 @@ mmg_tests/zz_cube*
 mmg_tests/tokamak_border
 
 mmg_tests/zz_tok*
-parallel/
 tests/results
 tests/test_jacobian.py
 __pycache__
@@ -20,7 +19,6 @@ poisson_cube/zz_res*
 poisson_cube/plot_tre_vs_vertices.py
 *.msh
 *.vtk
-tokamak/
 time/
 poisson_cube/NZ_1d_diagnos*
 tests/*.pdf
