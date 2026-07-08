@@ -1,5 +1,5 @@
 ### Naga-Zhang / PPR post-processing for P2 finite elements in 3D ###
-# Adapted from the 2D version.
+# Adapted from Theophile 2D version.
 
 
 import numpy as np
@@ -61,9 +61,6 @@ def find_closest_dofs(nodes, elems, nodes_to_elem_array, dofs, i):
     For vertex i, find all DOFs sitting at the midpoint of an edge (i, j)
     where j is a vertex connected to i. These are the P2 mid-edge DOFs
     that need to be updated by the cubic fit around i.
-    
-    In 3D this typically finds up to ~12 DOFs (average degree in a
-    tetrahedral mesh), but the loop is dimension-agnostic.
     '''
     cn = vertex_neighbors(elems, nodes_to_elem_array, i)
     cn = cn[cn != i]
@@ -274,88 +271,12 @@ def Gh_with_cond(uh):
     return Ghuh, cond_arr
 
 
-# --- Original parallel core (BUGGY — race condition on mid-edge DOFs) -------
-# Numba does not support reductions on 2-D arrays inside prange, so
-# "Ghuh += Ghuh_temp" is an unprotected read-modify-write on the shared
-# Ghuh array. Each mid-edge DOF l should receive 0.5 * grad_i(l) from
-# vertex i AND 0.5 * grad_j(l) from vertex j, but the race means only one
-# contribution lands, making G_nz ≈ 0.5 * grad(u) at edge-midpoint DOFs
-# instead of ≈ grad(u). This inflates ||grad(u_h) - G_nz|| by ~5x.
-#
-# @njit(parallel=True, cache=True)
-# def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
-#     Nnodes = nodes.shape[0]
-#     Ndofs = dofs.shape[0]
-#     Ghuh = np.zeros((Ndofs, 3))
-#     for i in prange(Nnodes):
-#         on_boundary = B[i]
-#         node_i = nodes[i]
-#         j = np.array([i])
-#         j = process_boundary_3d(elems, nodes_to_elem_array, j, B, on_boundary,
-#                                 dofs, dofmap_list, node_i)
-#         L = _patch(nodes_to_elem_array, dofmap_list, j)
-#         if L.shape[0] < N_MIN_PATCH:
-#             j_new = j.copy()
-#             for k in j:
-#                 j_new = np.union1d(j_new, vertex_neighbors(elems, nodes_to_elem_array, k))
-#             j = j_new
-#             L = _patch(nodes_to_elem_array, dofmap_list, j)
-#         hx = 0.0; hy = 0.0; hz = 0.0
-#         for m in range(L.shape[0]):
-#             dx = abs(dofs[L[m], 0] - node_i[0])
-#             dy = abs(dofs[L[m], 1] - node_i[1])
-#             dz = abs(dofs[L[m], 2] - node_i[2])
-#             if dx > hx: hx = dx
-#             if dy > hy: hy = dy
-#             if dz > hz: hz = dz
-#         if hx < H_DIR_TOL: hx = 1.0
-#         if hy < H_DIR_TOL: hy = 1.0
-#         if hz < H_DIR_TOL: hz = 1.0
-#         p = np.empty((L.shape[0], 3))
-#         for m in range(L.shape[0]):
-#             p[m, 0] = (dofs[L[m], 0] - node_i[0]) / hx
-#             p[m, 1] = (dofs[L[m], 1] - node_i[1]) / hy
-#             p[m, 2] = (dofs[L[m], 2] - node_i[2]) / hz
-#         A = _build_vandermonde(p)
-#         b = np.empty(L.shape[0])
-#         for m in range(L.shape[0]):
-#             b[m] = uh[L[m]]
-#         AtA = A.T @ A; Atb = A.T @ b
-#         a = np.linalg.solve(AtA, Atb)
-#         k_vertex = v2d[i]
-#         Ghuh[k_vertex, 0] = a[1] / hx
-#         Ghuh[k_vertex, 1] = a[2] / hy
-#         Ghuh[k_vertex, 2] = a[3] / hz
-#         L_edge = find_closest_dofs(nodes, elems, nodes_to_elem_array, dofs, i)
-#         Ghuh_temp = np.zeros((Ndofs, 3))      # ← O(N) alloc per vertex = O(N²) total
-#         for idx in range(L_edge.shape[0]):
-#             l = L_edge[idx]
-#             x = (dofs[l, 0] - node_i[0]) / hx
-#             y = (dofs[l, 1] - node_i[1]) / hy
-#             z = (dofs[l, 2] - node_i[2]) / hz
-#             gx, gy, gz = _eval_grad(a, x, y, z)
-#             Ghuh_temp[l, 0] += 0.5 * gx / hx
-#             Ghuh_temp[l, 1] += 0.5 * gy / hy
-#             Ghuh_temp[l, 2] += 0.5 * gz / hz
-#         Ghuh += Ghuh_temp                     # ← RACE CONDITION (2-D reduction)
-#     return Ghuh
-
 
 # --- Fixed serial core ------------------------------------------------------
 @njit(cache=True)
 def _Gh(nodes, elems, dofs, uh, nodes_to_elem_array, B, v2d, dofmap_list):
     '''
     Serial evaluation of the recovered gradient at every P2 DOF.
-
-    Key differences from 2D:
-      - per-direction rescaling h_x, h_y, h_z
-      - 20-column Vandermonde
-      - gradient evaluated and divided component-wise
-
-    Must be serial: mid-edge DOF l on edge (i,j) accumulates 0.5*grad_i(l)
-    from vertex i and 0.5*grad_j(l) from vertex j.  Direct += into the
-    shared Ghuh is safe in a sequential loop; prange without atomic ops
-    causes a race that makes G_nz wrong at those DOFs.
     '''
     Nnodes = nodes.shape[0]
     Ndofs = dofs.shape[0]

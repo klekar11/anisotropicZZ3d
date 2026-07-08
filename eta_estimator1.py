@@ -76,10 +76,7 @@ def compute_zz_grad(u_h: fem.Function):
     V_cg = fem.functionspace(domain, ("Lagrange", 1))
     n_vertices = domain.topology.index_map(0).size_local
 
-    # Build vertex→DOF map without a Python loop.
-    # cell_to_vertex.array and dofmap.list (shape n_cells×4) are both in the
-    # same (cell, local-vertex) order for P1 Lagrange, so a direct scatter is
-    # correct: every vertex is written consistently (same DOF each time).
+    # Build vertex-to-DOF map
     ctv_flat = cell_to_vertex.array                          # (n_cells*4,) global vertex ids
     dof_flat = np.asarray(V_cg.dofmap.list).ravel()         # (n_cells*4,) global DOF ids
     vertex_to_dof_arr = np.empty(n_vertices, dtype=np.intp)
@@ -87,12 +84,12 @@ def compute_zz_grad(u_h: fem.Function):
 
     # Expand vertex index once: vertex_rep[k] = owner vertex of vtc_cells[k]
     vtc_cells   = vertex_to_cell.array                       # flat cell indices (variable patch size)
-    vtc_offsets = vertex_to_cell.offsets                     # (n_vertices+1,)
+    vtc_offsets = vertex_to_cell.offsets                     # (n_vertices+1,), tells where each vertex's patch starts/ends in vtc_cells
     vertex_rep  = np.repeat(np.arange(n_vertices, dtype=np.intp), np.diff(vtc_offsets))
 
     grad_arr = grad_dg0.x.array[:n_cells * gdim].reshape(n_cells, gdim)
 
-    # Volume per patch entry — computed once, reused across directions
+    # Volume per patch entry
     vol_entries = vol[vtc_cells]
     den = np.bincount(vertex_rep, weights=vol_entries, minlength=n_vertices)
 
@@ -123,7 +120,7 @@ def compute_eta_zz(u_h: fem.Function):
 def compute_G_tilde(
     u_h: fem.Function,
 ) -> tuple[dict[tuple[int, int], np.ndarray], fem.Function]:
-    """Compute per-cell G̃_K matrices and the ZZ error as a storable Function.
+    """Compute per-cell G_tilde_K matrices and the ZZ error as a storable Function.
 
     Returns
     -------
