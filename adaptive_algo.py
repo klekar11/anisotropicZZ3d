@@ -56,7 +56,7 @@ def run_adaptive_poisson(
     tok_snap: dict | None = None,
     patch_cond_diag: "dict | None" = None,
 ) -> tuple:
-    """Run the anisotropic adaptive Poisson algorithm (Table 1.6).
+    """Run the anisotropic adaptive Poisson algorithm 
 
     Parameters
     ----------
