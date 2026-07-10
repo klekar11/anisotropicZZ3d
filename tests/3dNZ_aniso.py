@@ -1,11 +1,5 @@
 ### Verify 3D NZ-P2 recovery on anisotropic meshes ###
 # Mesh configs follow the (N1, N2, N3) format of 3D_Poisson_aniso_error.py.
-# h_xy = 1/N1 fixed; h_z = 1/N3 varies -> anisotropy ratios [20, 50, 100, 800].
-#
-# Problem choice (toggle USE_BOUNDARY_LAYER):
-#   False -> smooth sin(pi x)sin(pi y)sin(pi z), uh interpolated (same as 3dNZ.py)
-#   True  -> 1D tanh(z/eps) boundary layer (formula from problems.py _problem_1d,
-#            adapted to z), uh is the Poisson FEM solution
 
 import numpy as np
 import importlib.util
@@ -39,30 +33,27 @@ Gh_NZ_P2 = _NZ_MODULE.Gh
 
 from eta_estimator1 import compute_G_tilde_nz, compute_anisotropic_eta
 
-# ── problem choice ───────────────────────────────────────────────────────────
-USE_BOUNDARY_LAYER =False# set True for the 1D tanh boundary layer
-EPSILON            = 0.1    # layer thickness (problems.py EPSILON_1D default)
+USE_BOUNDARY_LAYER =False # set True for the 1D tanh boundary layer
+EPSILON            = 0.1    # layer thickness
 
-# ── mesh configs: (N1, N2, N3) ───────────────────────────────────────────────
 # anisotropy ratio = N3 / N1;  N1=N2 fixed, N3 = N1 * ratio
 configs = [
     (2, 2, 8),
     (4, 4, 16),
     (8, 8, 32),
 	(8,8,48),
-    (16, 16, 64),   # ratio 800  <- large; reduce N1=N2 if memory is tight
-    (16, 16, 82),   # ratio 512  <- non-pow2 test
+    (16, 16, 64), 
+    (16, 16, 82), 
 #	(16, 16, 92),
 #	(16, 16, 102),
 #    (16, 16, 112),
-#    (16, 16, 128),  # ratio 800 again but with more dofs
+#    (16, 16, 128),
 #    (16, 16, 142)
 ]
 
 r = 3   # degree raise for the "truth" interpolation
 k = 2   # P2 NZ recovery
 
-# ── problem formulas ─────────────────────────────────────────────────────────
 # Smooth reference (USE_BOUNDARY_LAYER=False)
 def u_smooth(x):
     return np.sin(np.pi * x[0]) * np.sin(np.pi * x[1]) * np.sin(np.pi * x[2])
@@ -82,7 +73,6 @@ def f_smooth_ufl(msh):
 
 u_numpy = u_tanh if USE_BOUNDARY_LAYER else u_smooth
 
-# ── Poisson solver (boundary-layer problem only) ─────────────────────────────
 def solve_poisson(msh, degree):
     """Solve -Δu = f with non-homogeneous Dirichlet BCs from u_tanh."""
     V  = functionspace(msh, ("Lagrange", degree))
@@ -100,7 +90,6 @@ def solve_poisson(msh, degree):
                                                  petsc_options={"ksp_type": "cg", "pc_type": "hypre", "ksp_rtol": "1e-12"},
                                                  petsc_options_prefix="poisson_nz_aniso_").solve()
 
-# ── main loop ────────────────────────────────────────────────────────────────
 pp = 'NZ_P2'
 Gh = Gh_NZ_P2
 
@@ -157,12 +146,12 @@ for i, (N1, N2, N3) in enumerate(configs):
     fe[i] = fem.assemble_scalar(form(
         ufl.dot(ufl.grad(I2u) - ufl.grad(uh), ufl.grad(I2u) - ufl.grad(uh)) * ufl.dx))
 
-    # EI_ZZ: NZ-based ZZ estimator (cf. compute_G_tilde in 3D_Poisson_aniso_error.py)
+    # EI_ZZ: NZ-based EI
     G_nz, _ = compute_G_tilde_nz(uh)
     gdim = mesh.geometry.dim
     eta_ZZ_arr[i] = np.sqrt(max(sum(np.sum(G_nz[(j, j)]) for j in range(gdim)), 0.0))
 
-    # EI_A: NZ-based anisotropic estimator (k=2 triggers compute_G_tilde_nz internally)
+    # EI_A: NZ-based EI^A
     eta_a_cells, _, _ = compute_anisotropic_eta(uh, f_ufl, k=k)
     eta_a_arr[i] = np.sqrt(np.sum(eta_a_cells))
 
@@ -197,7 +186,6 @@ for name, arr in [('A(te)', te), ('B(ee)', ee), ('C(be)', be)]:
     rates = np.log(arr[1:] / arr[:-1]) / np.log(h_z_arr[1:] / h_z_arr[:-1])
     print(f"  {name}: " + "  ".join(f"{s:6.2f}" for s in rates))
 
-# ── plots ────────────────────────────────────────────────────────────────────
 _FINFO = {
     "A": {"label": r"$A=\|\nabla u_h-\nabla u\|$",       "color": "#1f77b4", "marker": "o", "ls": "-"},
     "B": {"label": r"$B=\|\nabla u_h-G_h u_h\|$",        "color": "#ff7f0e", "marker": "s", "ls": "-"},

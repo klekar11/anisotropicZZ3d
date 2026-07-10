@@ -1,3 +1,4 @@
+### 3D ZZ on anisotropic mesh
 import numpy as np
 import sys
 from pathlib import Path
@@ -52,11 +53,6 @@ def solve_poisson_anisotropic(N1: int, N2: int, N3: int, degree: int = 1):
     )
     return problem.solve(), f
 
-# ------------------------------------------------------------------
-# Anisotropic mesh refinement study
-# N1 fixed fine in x1, N2 coarsening ratio controlled separately
-# h1 = 1/N1, h2 = 1/N2 — reported separately to show anisotropy
-# ------------------------------------------------------------------
 configs = [
     # (1,  4, 4),
     (2,  8, 8),

@@ -3,18 +3,6 @@ Polynomial-preserving property test for the 3D Naga-Zhang / PPR recovery.
 
 Theory: if u ∈ P3, then G_h(I_h u) = ∇u  exactly (up to machine precision).
 We use u(x,y,z) = x³ + y³ + z³, so ∇u = (3x², 3y², 3z²).
-
-The test interpolates u into the P2 FE space (which cannot represent a cubic
-exactly — that's fine, PPR fits a cubic patch and recovers the derivative of
-the *true* cubic from the P2 samples), then calls Gh and compares the result
-at every DOF of the P2-vector space to the analytical gradient.
-
-If the max pointwise error is O(1e-10) or smaller → the recovery is correct.
-If it is O(1)                                     → the old parallel/cached
-                                                     version is still running.
-If it is ≈ 0.5 * ∇u                               → race condition (only one
-                                                     of the two 0.5-contributions
-                                                     reaches each mid-edge DOF).
 """
 
 import sys
@@ -31,7 +19,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# ---- import YOUR existing Gh ------------------------------------------
 from nz_eta_estimatorP2 import Gh
 
 
@@ -58,9 +45,6 @@ def test_polynomial_preserving(N: int = 6):
     grad_exact = np.zeros_like(Ghuh.x.array)
     n_dofs_scalar = dof_coords.shape[0]
 
-    # V2 is ("Lagrange", 2, (3,)).  DOF layout: the first n_dofs_scalar
-    # entries are component 0, the next are component 1, etc.
-    # This is the default block layout in dolfinx for vector spaces.
     bs = V2.dofmap.bs                         # block size = 3
     n_blocks = V2.dofmap.index_map.size_local  # = n_dofs_scalar
 
@@ -93,10 +77,8 @@ def test_polynomial_preserving(N: int = 6):
         print(f"  ? MARGINAL — error {max_err:.2e} is above machine eps but below O(1)")
         print("    Check boundary patches and patch conditioning")
 
-    # Detailed breakdown: vertex DOFs vs mid-edge DOFs
     n_vertices = mesh.topology.index_map(0).size_local
-    # In a P2 scalar space, DOFs 0..n_vertices-1 sit on vertices,
-    # the rest are mid-edge DOFs.  The vector space interleaves them.
+
     vertex_err = []
     edge_err = []
     for block in range(n_blocks):

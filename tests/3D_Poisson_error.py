@@ -1,3 +1,4 @@
+### 3D ZZ on isotropic meshes ###
 import numpy as np
 import ufl
 from pathlib import Path
@@ -26,7 +27,6 @@ u_ufl = u_ex(ufl)
 
 
 def solve_poisson(N: int = 8, degree: int = 1):
-    # MPI.COMM_SELF: single-process communicator — no domain decomposition
     mesh = create_unit_cube(MPI.COMM_SELF, N, N, N)
     x = SpatialCoordinate(mesh)
     f = -div(grad(u_ufl(x)))
@@ -86,7 +86,6 @@ EI_As = np.array(EI_As)
 ERE_ZZs = np.array(ERE_ZZs)
 EI_ZZs = np.array(EI_ZZs)
 
-# no comm.rank guard: single process always prints
 print(f"\n{'h':>10} {'TRE':>10} {'p_TRE':>7} "
       f"{'ERE':>10} {'p_ERE':>7} {'EI':>8} {'EI_A':>8} "
       f"{'ERE_ZZ':>10} {'p_ZZ':>7} {'EI_ZZ':>8}")

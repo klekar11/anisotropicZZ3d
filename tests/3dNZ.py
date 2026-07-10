@@ -1,5 +1,4 @@
-### Verify 3D post-processing ###
-# 3D analogue of the 2D verification script.
+### Verify 3D NZ-P2 with isotropic meshes ###
 
 import numpy as np
 import importlib.util
@@ -29,7 +28,6 @@ r = 1                # degree raise for the "truth" projection
 Nmesh = 5            # number of refinement levels (3D scales cubically!)
 post_processing = ('NZ_P2',)   # extend if you port NZ_P1 / ZZ to 3D
 
-# Smooth exact solution with nontrivial gradient in every direction.
 u = lambda x: np.sin(np.pi * x[0]) * np.sin(np.pi * x[1]) * np.sin(np.pi * x[2])
 
 def f_smooth_ufl(msh):
@@ -48,7 +46,7 @@ for pp in post_processing:
     be          = np.zeros(Nmesh)
     eta_ZZ_arr  = np.zeros(Nmesh)
     eta_a_arr   = np.zeros(Nmesh)
-    ar_arr      = np.zeros(Nmesh)   # mean aspect ratio per mesh level
+    ar_arr      = np.zeros(Nmesh)
     h           = np.zeros(Nmesh)
 
     for i in range(Nmesh):
@@ -94,7 +92,6 @@ for pp in post_processing:
         print(f"  [level {i}]  N={N:>3}  #dofs(V)={V.dofmap.index_map.size_global}"
               f"  mean_AR={ar_arr[i]:.3f}")
 
-    # Convert from squared H1-seminorm errors to the actual seminorm errors.
     te     = np.sqrt(te)
     ee     = np.sqrt(ee)
     be     = np.sqrt(be)
